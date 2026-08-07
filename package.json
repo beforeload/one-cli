@@ -4,6 +4,14 @@
   "description": "A small, auditable coding agent CLI",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beforeload/one-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/beforeload/one-cli/issues"
+  },
+  "homepage": "https://github.com/beforeload/one-cli#readme",
   "bin": {
     "one-cli": "./dist/index.js"
   },
