@@ -1,7 +1,7 @@
 {
   "name": "one-cli",
   "version": "0.1.0",
-  "description": "A small, auditable one-cli CLI",
+  "description": "A small, auditable coding agent CLI",
   "type": "module",
   "license": "MIT",
   "bin": {
