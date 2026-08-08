@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import {
   canTransitionAttempt,
@@ -509,9 +508,7 @@ export class AutonomyStore {
     if (options.readOnly === true) {
       let database: DatabaseSync | undefined;
       if (filePath !== ":memory:" && fs.existsSync(filePath)) {
-        const location = pathToFileURL(path.resolve(filePath));
-        location.searchParams.set("immutable", "1");
-        database = new DatabaseSync(location.href, { readOnly: true });
+        database = new DatabaseSync(path.resolve(filePath), { readOnly: true });
         const version = Number(
           (database.prepare("PRAGMA user_version").get() as unknown as { user_version: number })
             .user_version,
