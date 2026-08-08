@@ -7,6 +7,7 @@ import {
   GitHubClient,
   GitHubHttpError,
   GitHubRefConflictError,
+  GitHubRestProjection,
   type GitHubTransport,
   type GitHubTransportRequest,
 } from "../../src/autonomy/github.js";
@@ -109,6 +110,48 @@ describe("portable autonomy adapters", () => {
     expect(request?.stdin).toBe('{"body":"quoted; $(touch /tmp/nope) \\" text"}');
     expect(request?.env).not.toHaveProperty("GH_TOKEN");
     expect(request?.env).not.toHaveProperty("GITHUB_TOKEN");
+  });
+
+  it("passes the fixed bounded release projection to gh argv", async () => {
+    const runner = new FakeProcessRunner(() =>
+      processResult({
+        stdout:
+          '[{"id":1,"node_id":"R_1","tag_name":"v1","name":"Release","body":"Notes","html_url":"https://github.com/acme/widget/releases/tag/v1","published_at":"2026-08-08T08:00:00Z","created_at":"2026-08-08T07:00:00Z"}]',
+      }),
+    );
+    const transport = new GhRestTransport({ runner, ghExecutable: "gh" });
+
+    const output = await transport.request({
+      method: "GET",
+      path: "/repos/acme/widget/releases?per_page=10&page=1",
+      projection: GitHubRestProjection.ReleaseListMetadata,
+    });
+
+    expect(output).toEqual([
+      expect.objectContaining({
+        id: 1,
+        tag_name: "v1",
+        body: "Notes",
+      }),
+    ]);
+    expect(output).not.toEqual([
+      expect.objectContaining({
+        assets: expect.anything(),
+      }),
+    ]);
+    expect(runner.requests[0]?.args).toEqual([
+      "api",
+      "/repos/acme/widget/releases?per_page=10&page=1",
+      "--method",
+      "GET",
+      "--header",
+      "Accept: application/vnd.github+json",
+      "--header",
+      "X-GitHub-Api-Version: 2022-11-28",
+      "--jq",
+      "map({id,node_id,tag_name,name,body,html_url,published_at,created_at})",
+    ]);
+    expect(runner.requests[0]?.maxOutputBytes).toBe(4 * 1024 * 1024);
   });
 
   it("constructs git argv internally and rejects unsafe refs", async () => {

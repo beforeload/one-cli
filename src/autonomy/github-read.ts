@@ -5,6 +5,7 @@ import {
 } from "./github-graphql.js";
 import {
   GitHubHttpError,
+  GitHubRestProjection,
   type GitHubRepositoryRef,
   type GitHubTransport,
 } from "./github.js";
@@ -293,6 +294,7 @@ export class GitHubReadClient {
         const value = await this.restRequest(sourceId, budget, {
           method: "GET",
           path: `${repositoryPath(state.repository)}/releases?per_page=${perPage}&page=${page}`,
+          projection: GitHubRestProjection.ReleaseListMetadata,
           ...(signal === undefined ? {} : { signal }),
         });
         const rawReleases = array(value, "releases");

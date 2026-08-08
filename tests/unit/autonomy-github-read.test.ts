@@ -11,6 +11,7 @@ import {
 } from "../../src/autonomy/github-read.js";
 import {
   GitHubHttpError,
+  GitHubRestProjection,
   type GitHubTransport,
   type GitHubTransportRequest,
 } from "../../src/autonomy/github.js";
@@ -176,6 +177,43 @@ describe("GitHubReadClient", () => {
     expect(releases.items).toHaveLength(1);
     expect(Buffer.byteLength(releases.items[0]?.title ?? "")).toBeLessThanOrEqual(8);
     expect(releases.items[0]?.body).toBe("");
+  });
+
+  it("requests bounded release metadata without asset payloads", async () => {
+    const rest = new QueueRest([
+      [
+        {
+          id: 1,
+          node_id: "R_1",
+          tag_name: "v1",
+          name: "Release",
+          body: "Notes",
+          html_url: "https://github.com/acme/widget/releases/tag/v1",
+          published_at: "2026-08-08T08:00:00Z",
+          created_at: "2026-08-08T07:00:00Z",
+        },
+      ],
+    ]);
+    const client = new GitHubReadClient(rest, new QueueGraphql([]), {
+      maxReleases: 10,
+      maxPages: 1,
+    });
+
+    const releases = await client.listRecentReleases(
+      "openai-codex",
+      state,
+      `${state.repositoryUrl}/releases`,
+      client.createBudget(),
+    );
+
+    expect(releases.items).toHaveLength(1);
+    expect(rest.requests).toEqual([
+      {
+        method: "GET",
+        path: "/repos/acme/widget/releases?per_page=10&page=1",
+        projection: GitHubRestProjection.ReleaseListMetadata,
+      },
+    ]);
   });
 
   it("rejects source URL escapes", async () => {
