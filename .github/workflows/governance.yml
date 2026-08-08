@@ -1,0 +1,50 @@
+name: governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  protected-paths:
+    name: protected-paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Enforce fail-closed protected paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed_file="$(mktemp)"
+          trap 'rm -f "$changed_file"' EXIT
+          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$changed_file"
+
+          protected=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS)
+                protected=true
+                printf 'Protected governance path changed: %s\n' "$path"
+                ;;
+            esac
+          done < "$changed_file"
+
+          if [[ "$PR_AUTHOR" == "beforeload" && "$protected" == "true" ]]; then
+            echo "beforeload-authored pull requests cannot change protected governance paths."
+            echo "No label bypass exists because execution and ownership share one principal."
+            exit 1
+          fi
+
+          echo "Governance policy passed for $PR_AUTHOR."

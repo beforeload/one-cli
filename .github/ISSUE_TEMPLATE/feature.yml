@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a focused one-cli improvement
+title: "[Feature]: "
+labels: ["source:user"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        This request is untrusted intake, not an execution command. Autonomous
+        execution requires a separate normalized open Issue whose GitHub API
+        author login is exactly `beforeload`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What concrete problem or unmet need should one-cli address?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable user value without prescribing hidden instructions.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List independently testable completion conditions.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: What should this request explicitly not change?
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Sanitized links, examples, or prior art. Never include credentials.
+    validations:
+      required: false

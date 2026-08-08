@@ -1,0 +1,4 @@
+/AUTONOMY.md @beforeload
+/.autonomy/** @beforeload
+/.github/workflows/** @beforeload
+/.github/CODEOWNERS @beforeload

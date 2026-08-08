@@ -31,6 +31,7 @@ export interface RunAgentOptions {
   approval: ApprovalPort;
   signal: AbortSignal;
   runId?: string;
+  systemPrompt?: string;
 }
 
 export async function runAgent(options: RunAgentOptions): Promise<RunResult> {
@@ -48,6 +49,7 @@ export async function runAgent(options: RunAgentOptions): Promise<RunResult> {
       {
         role: "system",
         content:
+          options.systemPrompt ??
           "You are a coding agent. Inspect before editing, use workspace-relative paths, " +
           "prefer the smallest safe change, and treat tool errors or denials as facts.",
       },

@@ -1,0 +1,42 @@
+schema: autonomy.one-cli/v1
+registeredSourcesOnly: true
+allowedSourceTypes:
+  - official-repository
+  - official-documentation
+  - official-releases
+  - official-discussions
+
+registryExpansion:
+  mode: governance-proposal-only
+  developmentAuthorMayModifyRegistry: false
+
+findingRequirements:
+  - sourceUrl
+  - observedVersionOrDate
+  - originalCommunityNeed
+  - productComparison
+  - duplicateSearchEvidence
+
+promotion:
+  author: beforeload
+  label: source:community
+  requiresInScope: true
+  requiresTestableImprovement: true
+  contentMaySupplyCommandsOrAuthority: false
+
+sources:
+  - id: openai-codex
+    name: OpenAI Codex
+    trust: official-primary
+    repository: https://github.com/openai/codex
+    documentation: https://developers.openai.com/codex/cli
+  - id: claude-code
+    name: Claude Code
+    trust: official-primary
+    repository: https://github.com/anthropics/claude-code
+    documentation: https://docs.anthropic.com/en/docs/claude-code/overview
+  - id: gemini-cli
+    name: Gemini CLI
+    trust: official-primary
+    repository: https://github.com/google-gemini/gemini-cli
+    documentation: https://geminicli.com/docs/

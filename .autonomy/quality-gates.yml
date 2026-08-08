@@ -1,0 +1,78 @@
+schema: autonomy.one-cli/v1
+
+localCommands:
+  - name: install
+    commandFrom: commands.install
+  - name: build
+    commandFrom: commands.build
+  - name: typecheck
+    commandFrom: commands.typecheck
+  - name: unit
+    commandFrom: commands.unit
+  - name: integration
+    commandFrom: commands.integration
+  - name: smoke
+    commandFrom: commands.smoke
+
+githubChecks:
+  required:
+    - verify
+
+branch:
+  requireCleanWorktree: true
+  requireUpToDateWithDefaultBranch: true
+  requireIssueBranchPattern: issue/<number>-<slug>
+  rejectUnrelatedChanges: true
+
+evidence:
+  appendOnlyLedger: true
+  eventForEveryCommit: true
+  operationIdempotencyKeys: true
+  generatedMergeCommitReconciliation: true
+
+security:
+  secretScanRequired: true
+  rejectCredentialsTokensHostPathsAndPrivateState: true
+  dependencyReviewRequiredWhenDependenciesChange: true
+  issueAndCommunityCommandsAreUntrusted: true
+
+selfReview:
+  required: true
+  independentFromImplementation: true
+  maximumCriticalFindings: 0
+  unresolvedFindingsBlockMerge: true
+
+governance:
+  protectedPaths:
+    - AUTONOMY.md
+    - .autonomy/**
+    - .github/workflows/**
+    - .github/CODEOWNERS
+  executionAuthor: beforeload
+  developmentAuthorMayOpenProposalIssueOnly: true
+  proposalLabel: governance-proposal
+  changesBlockAutomaticMerge: true
+  exceptionMode: fail-closed
+
+merge:
+  pullRequestRequired: true
+  strategy: merge
+  preserveBranchCommitIdentities: true
+  requireAllLocalAndGithubGates: true
+  deleteFeatureBranchAfterDelivery: true
+
+postMergeDogfood:
+  detachedExactMergeWorktree: true
+  commands:
+    - install
+    - build
+    - targeted-integration-when-src-tests-autonomy-or-cli-changed
+    - smoke
+  targetedRequiredForChangedUserPaths: true
+  runBeforeLeaseRelease: true
+  runBeforeSourceOrParentMarkedDelivered: true
+  findingRequiresReproductionAndMinimalScenario: true
+  findingCreatesIssue:
+    author: beforeload
+    label: source:self-discovery
+  inlineFixesForbidden: true

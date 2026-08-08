@@ -1,0 +1,27 @@
+schema: autonomy.one-cli/v1
+product:
+  name: one-cli
+  type: cli
+repository:
+  owner: beforeload
+  name: one-cli
+  defaultBranch: main
+  mergeStrategy: merge
+execution:
+  author: beforeload
+runtime:
+  node: ">=22.13.0"
+  packageManager: npm
+commands:
+  install: npm ci
+  build: npm run build
+  typecheck: npm run typecheck
+  unit: npm test
+  integration: npm run test:integration
+  smoke: npm run smoke
+limits:
+  tickMinutes: 60
+  commitsMin: 1
+  commitsMax: 3
+  loopMinutes: 30
+mode: auto-merge

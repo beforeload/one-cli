@@ -86,8 +86,14 @@ const ShellSchema = z.object({
 export class ToolRunner {
   private readonly tools: Map<string, ToolDefinition>;
 
-  constructor(definitions: readonly ToolDefinition[] = builtInTools()) {
-    this.tools = new Map(definitions.map((tool) => [tool.name, tool]));
+  constructor(
+    definitions: readonly ToolDefinition[] = builtInTools(),
+    excludedNames: readonly string[] = [],
+  ) {
+    const excluded = new Set(excludedNames);
+    this.tools = new Map(
+      definitions.filter((tool) => !excluded.has(tool.name)).map((tool) => [tool.name, tool]),
+    );
   }
 
   specs(): ToolSpec[] {

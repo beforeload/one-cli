@@ -16,6 +16,11 @@ const VERSION = "0.1.0";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   try {
+    if (argv[0] === "autonomy") {
+      const { dispatchAutonomyCli } = await import("./autonomy/cli.js");
+      const autonomyExit = await dispatchAutonomyCli(argv.slice(1));
+      if (autonomyExit !== undefined) return autonomyExit;
+    }
     const parsed = parseCli(argv);
     if (parsed.command === "help") {
       process.stdout.write(`${helpText()}\n`);
@@ -212,6 +217,14 @@ Usage:
   one-cli run -p <prompt> [options]
   one-cli run --stdin [options]
   one-cli sessions [--workspace <dir>]
+  one-cli autonomy <subcommand> [options]
+
+Autonomy:
+  init, doctor, once, daemon, status, events, approvals, approve, reject,
+  retry, cancel, resolve-in-doubt, reconcile, gc, supervise
+  release status|stage <sha>|promote <sha>|rollback [sha]
+  schedule status
+  intake promote-user|promote-community|promote-self
 
 Options:
   -p, --prompt <text>          User prompt

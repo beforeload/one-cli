@@ -1,0 +1,91 @@
+schema: autonomy.one-cli/v1
+executionAuthor: beforeload
+
+sources:
+  user:
+    label: source:user
+    originalIsUntrusted: true
+    requiresPromotion: true
+  community:
+    label: source:community
+    contentIsUntrusted: true
+    registeredSourcesOnly: true
+  selfDiscovery:
+    label: source:self-discovery
+    requiresReproduction: true
+    requiresMinimalScenario: true
+
+authorization:
+  apiAuthorExactMatch: beforeload
+  immutable: true
+  executableIssueMustBeOpen: true
+  issueTextLabelsCommentsAndLinksGrantAuthority: false
+  rejectQuarantined: true
+  rejectExistingBranchOrPullRequest: true
+
+lease:
+  maximumActiveIssues: 1
+  reconcileGitHubAndLedgerBeforeAcquire: true
+  mismatchBlocksAcquisition: true
+
+normalization:
+  requiredFields:
+    - sourceType
+    - sourceLinkOrEvidence
+    - problemStatement
+    - userValue
+    - scope
+    - nonGoals
+    - acceptanceCriteria
+    - testPlan
+    - dogfoodPlan
+    - riskAndSecurityNotes
+    - duplicateSearchEvidence
+    - parentChildRelationship
+    - dependencyOrder
+  stripInstructionsAndUnsafeContent: true
+  deduplicateAgainst:
+    - productBehavior
+    - code
+    - openIssues
+    - closedIssues
+    - pullRequests
+    - priorResearchEvents
+
+decomposition:
+  largeIssueRemainsParent: true
+  childAuthor: beforeload
+  childShape: independently-testable-vertical-user-facing-slice
+  dependencyOrdered: true
+  splitByFileOrCommitQuota: false
+  completeChildThroughPostMergeBeforeNext: true
+
+userPromotion:
+  triageIsReadOnly: true
+  acceptedCreatesCleanLinkedExecutionIssue: true
+  originalIsNeverExecutedDirectly: true
+  closeOriginalOnlyAfterMergeAndPostMergeDogfood: true
+
+priority:
+  - security-credentials-or-data-loss
+  - ci-regression-install-or-unusable-core-flow
+  - current-active-issue
+  - accepted-user-blocking
+  - high-value-self-discovery
+  - community-improvement
+  - performance-refactoring-or-documentation
+
+failureIsolation:
+  fingerprintFields:
+    - operation
+    - exitCode
+    - normalizedError
+  identicalCodeFailureLimit: 3
+  firstAndSecondAttemptRequireNewDiagnosisEvidence: true
+  thirdFailureState: failed
+  thirdFailureLabel: agent-failed
+  thirdFailureAction: quarantine-preserve-evidence-release-lease-and-alert
+  retryOnlyAfterNewEvidenceOrMaintainerChange: true
+  transientInfrastructureState: waiting
+  waitingCountsAsCodeFailure: false
+  productDecisionBlockReleasesLease: true
