@@ -4,6 +4,7 @@ import type { AutonomyStore } from "./store.js";
 
 export const GLOBAL_DOGFOOD_INTERVAL_MS = 24 * 60 * 60_000;
 export const COMMUNITY_SCAN_INTERVAL_MS = 2 * 60 * 60_000;
+export const COMMUNITY_SCAN_MAX_LATENESS_MS = 60 * 60_000;
 export const DEFAULT_SCHEDULE_ACTION_TTL_MS = 30 * 60_000;
 
 export const SCHEDULE_PRIORITY = [
@@ -12,6 +13,7 @@ export const SCHEDULE_PRIORITY = [
   "user-promotion",
   "post-merge-dogfood",
   "global-dogfood",
+  "gap-promotion",
   "ready-issue",
   "community-scan",
 ] as const;
@@ -31,6 +33,7 @@ export interface ScheduleInputs {
   due: ScheduleDueTimestamps;
   hasActiveIssue: boolean;
   hasPromotableUserIssue: boolean;
+  hasPromotableGap?: boolean;
   hasReadyIssue?: boolean;
   actionInProgress?: ScheduledActionKind;
 }
@@ -49,10 +52,12 @@ export interface ScheduleClaim {
 
 export interface SchedulerNextInput {
   now?: number;
+  initializeDue?: boolean;
   reconcileRequired?: boolean;
   postMergeDogfoodDueAt?: number;
   hasActiveIssue?: boolean;
   hasPromotableUserIssue?: boolean;
+  hasPromotableGap?: boolean;
   hasReadyIssue?: boolean;
 }
 
@@ -74,6 +79,14 @@ export function computeNextScheduledAction(input: ScheduleInputs): ScheduledActi
   if (timestamp(input.due.globalDogfood, "global dogfood due time") <= now) {
     return scheduled("global-dogfood", input.due.globalDogfood);
   }
+  if (
+    timestamp(input.due.communityScan, "community scan due time") +
+      COMMUNITY_SCAN_MAX_LATENESS_MS <=
+    now
+  ) {
+    return scheduled("community-scan", input.due.communityScan);
+  }
+  if (input.hasPromotableGap === true) return scheduled("gap-promotion", now);
   if (input.hasReadyIssue === true) return scheduled("ready-issue", now);
   if (timestamp(input.due.communityScan, "community scan due time") <= now) {
     return scheduled("community-scan", input.due.communityScan);
@@ -138,7 +151,7 @@ export class AutonomyScheduler {
       this.setRecurringDue("global-dogfood", at + GLOBAL_DOGFOOD_INTERVAL_MS, at);
     }
     if (!existing.some((event) => event.type === "schedule.community-scan.due")) {
-      this.setRecurringDue("community-scan", at + COMMUNITY_SCAN_INTERVAL_MS, at);
+      this.setRecurringDue("community-scan", at + this.communityScanIntervalMs(), at);
     }
     return this.due(at);
   }
@@ -190,7 +203,8 @@ export class AutonomyScheduler {
 
   next(input: SchedulerNextInput = {}): ScheduledAction | undefined {
     const now = timestamp(input.now ?? Date.now(), "schedule time");
-    const due = this.ensureDueTimestamps(now);
+    const due =
+      input.initializeDue === false ? this.due(now) : this.ensureDueTimestamps(now);
     if (input.postMergeDogfoodDueAt !== undefined) {
       due.postMergeDogfood = timestamp(
         input.postMergeDogfoodDueAt,
@@ -206,6 +220,7 @@ export class AutonomyScheduler {
       due,
       hasActiveIssue: input.hasActiveIssue ?? activeAttempt !== undefined,
       hasPromotableUserIssue: input.hasPromotableUserIssue ?? false,
+      hasPromotableGap: input.hasPromotableGap ?? false,
       hasReadyIssue: input.hasReadyIssue ?? false,
       ...(actionInProgress === undefined ? {} : { actionInProgress }),
     });
@@ -268,7 +283,7 @@ export class AutonomyScheduler {
       this.setRecurringDue("global-dogfood", at + GLOBAL_DOGFOOD_INTERVAL_MS, at);
     }
     if (claim.action.kind === "community-scan") {
-      this.setRecurringDue("community-scan", at + COMMUNITY_SCAN_INTERVAL_MS, at);
+      this.setRecurringDue("community-scan", at + this.communityScanIntervalMs(), at);
     }
     if (claim.action.kind === "post-merge-dogfood") {
       this.store.appendEvent({
@@ -341,6 +356,11 @@ export class AutonomyScheduler {
       data: { dueAt: due, marker: scheduleMarker(kind, due) },
       createdAt: timestamp(now, "schedule time"),
     });
+  }
+
+  private communityScanIntervalMs(): number {
+    const minutes = this.config.community?.monitoring?.intervalMinutes;
+    return minutes === undefined ? COMMUNITY_SCAN_INTERVAL_MS : minutes * 60_000;
   }
 
   private runningAction(now: number): ScheduledActionKind | undefined {

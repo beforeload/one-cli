@@ -16,6 +16,41 @@ export const COMMUNITY_SOURCE_LABEL = "source:community";
 export const SELF_DISCOVERY_SOURCE_LABEL = "source:self-discovery";
 export const AGENT_READY_LABEL = "agent-ready";
 export const MAINTAINER_ACCEPTED_LABEL = "maintainer-accepted";
+export const APPROVED_PATHS_BINDING_PREFIX = "Trusted approved paths (exact JSON): ";
+export const COMMUNITY_SCHEMA = "autonomy.one-cli/community-v2";
+export const COMMUNITY_SOURCE_IDS = [
+  "qwen-code",
+  "claude-code",
+  "openai-codex",
+  "gemini-cli",
+  "opencode",
+  "aider",
+  "goose",
+  "continue-cli",
+  "oh-my-cli",
+] as const;
+export const COMMUNITY_CAPABILITY_TOPICS = [
+  "project-monitoring",
+  "interactive-coding-agent",
+  "long-sessions-context",
+  "extensions-parallelism",
+  "provider-cost-governance",
+  "safety-platform-testing-docs",
+] as const;
+export type CommunityCapabilityTopic = (typeof COMMUNITY_CAPABILITY_TOPICS)[number];
+const OFFICIAL_COMMUNITY_REPOSITORIES: Readonly<
+  Record<(typeof COMMUNITY_SOURCE_IDS)[number], string>
+> = {
+  "qwen-code": "https://github.com/QwenLM/qwen-code",
+  "claude-code": "https://github.com/anthropics/claude-code",
+  "openai-codex": "https://github.com/openai/codex",
+  "gemini-cli": "https://github.com/google-gemini/gemini-cli",
+  opencode: "https://github.com/anomalyco/opencode",
+  aider: "https://github.com/Aider-AI/aider",
+  goose: "https://github.com/aaif-goose/goose",
+  "continue-cli": "https://github.com/continuedev/continue",
+  "oh-my-cli": "https://github.com/qwen-code-dev-bot/oh-my-cli",
+};
 
 const MAX_TITLE_LENGTH = 160;
 const MAX_FIELD_LENGTH = 4_096;
@@ -40,6 +75,27 @@ export interface PromotionResult {
   executionIssue?: GitHubIssue;
   idempotencyKey: string;
   marker: string;
+  operationId?: string;
+}
+
+export class IntakeWriteInDoubtError extends Error {
+  constructor(
+    readonly operationId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "IntakeWriteInDoubtError";
+  }
+}
+
+export class IntakePromotionRetryableError extends Error {
+  constructor(
+    readonly operationId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "IntakePromotionRetryableError";
+  }
 }
 
 export interface UserPromotionInput {
@@ -64,24 +120,33 @@ export interface SelfDiscoveryPromotionInput {
 }
 
 export interface CommunitySource {
-  id: string;
+  id: (typeof COMMUNITY_SOURCE_IDS)[number];
   name: string;
   trust: "official-primary";
-  repository?: string;
-  documentation?: string;
-  releases?: string;
-  discussions?: string;
+  repository: string;
+  documentation: {
+    url: string;
+    kind: "official-documentation";
+  };
+  releases: string;
+  discussions: string;
+  topics: readonly CommunityCapabilityTopic[];
 }
 
 export interface CommunityRegistry {
-  schema: "autonomy.one-cli/v1";
+  schema: typeof COMMUNITY_SCHEMA;
   registeredSourcesOnly: true;
+  monitoring: {
+    intervalMinutes: 120;
+    maximumLatenessMinutes: 60;
+  };
   allowedSourceTypes: readonly (
     | "official-repository"
     | "official-documentation"
     | "official-releases"
     | "official-discussions"
   )[];
+  capabilityTopics: readonly CommunityCapabilityTopic[];
   registryExpansion: {
     mode: "governance-proposal-only";
     developmentAuthorMayModifyRegistry: false;
@@ -92,6 +157,7 @@ export interface CommunityRegistry {
     "originalCommunityNeed",
     "productComparison",
     "duplicateSearchEvidence",
+    "approvedPaths",
   ];
   promotion: {
     author: string;
@@ -111,6 +177,7 @@ export interface CommunityFinding {
   originalCommunityNeed: string;
   productComparison: string;
   duplicateSearchEvidence: string;
+  approvedPaths: readonly string[];
   inScope: true;
   testableImprovement: true;
 }
@@ -129,38 +196,46 @@ export interface SelfDiscoveryFinding {
 
 const CommunitySourceSchema = z
   .object({
-    id: z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9._-]*$/u),
+    id: z.enum(COMMUNITY_SOURCE_IDS),
     name: z.string().min(1).max(200),
     trust: z.literal("official-primary"),
-    repository: z.url().optional(),
-    documentation: z.url().optional(),
-    releases: z.url().optional(),
-    discussions: z.url().optional(),
+    repository: z.url(),
+    documentation: z
+      .object({
+        url: z.url(),
+        kind: z.literal("official-documentation"),
+      })
+      .strict(),
+    releases: z.url(),
+    discussions: z.url(),
+    topics: z.array(z.enum(COMMUNITY_CAPABILITY_TOPICS)).min(1),
   })
-  .strict()
-  .refine(
-    (source) =>
-      source.repository !== undefined ||
-      source.documentation !== undefined ||
-      source.releases !== undefined ||
-      source.discussions !== undefined,
-    "Community source must declare at least one allowlisted URL",
-  );
+  .strict();
 
 const CommunityRegistrySchema = z
   .object({
-    schema: z.literal("autonomy.one-cli/v1"),
+    schema: z.literal(COMMUNITY_SCHEMA),
     registeredSourcesOnly: z.literal(true),
-    allowedSourceTypes: z
-      .array(
-        z.enum([
-          "official-repository",
-          "official-documentation",
-          "official-releases",
-          "official-discussions",
-        ]),
-      )
-      .min(1),
+    monitoring: z
+      .object({
+        intervalMinutes: z.literal(120),
+        maximumLatenessMinutes: z.literal(60),
+      })
+      .strict(),
+    allowedSourceTypes: z.tuple([
+      z.literal("official-repository"),
+      z.literal("official-documentation"),
+      z.literal("official-releases"),
+      z.literal("official-discussions"),
+    ]),
+    capabilityTopics: z.tuple([
+      z.literal("project-monitoring"),
+      z.literal("interactive-coding-agent"),
+      z.literal("long-sessions-context"),
+      z.literal("extensions-parallelism"),
+      z.literal("provider-cost-governance"),
+      z.literal("safety-platform-testing-docs"),
+    ]),
     registryExpansion: z
       .object({
         mode: z.literal("governance-proposal-only"),
@@ -173,6 +248,7 @@ const CommunityRegistrySchema = z
       z.literal("originalCommunityNeed"),
       z.literal("productComparison"),
       z.literal("duplicateSearchEvidence"),
+      z.literal("approvedPaths"),
     ]),
     promotion: z
       .object({
@@ -183,7 +259,7 @@ const CommunityRegistrySchema = z
         contentMaySupplyCommandsOrAuthority: z.literal(false),
       })
       .strict(),
-    sources: z.array(CommunitySourceSchema).min(1),
+    sources: z.array(CommunitySourceSchema).length(COMMUNITY_SOURCE_IDS.length),
   })
   .strict();
 
@@ -196,6 +272,7 @@ const CommunityFindingSchema = z
     originalCommunityNeed: z.string().min(1).max(MAX_FIELD_LENGTH),
     productComparison: z.string().min(1).max(MAX_FIELD_LENGTH),
     duplicateSearchEvidence: z.string().min(1).max(MAX_FIELD_LENGTH),
+    approvedPaths: z.array(z.string().min(1).max(512)).min(1).max(128),
     inScope: z.literal(true),
     testableImprovement: z.literal(true),
   })
@@ -251,7 +328,10 @@ export function sanitizeUntrustedFields(
   for (const key of Object.keys(fields).sort()) {
     if (!/^[A-Za-z][A-Za-z0-9]*$/u.test(key)) throw new Error(`Unsafe normalized field: ${key}`);
     if (remaining <= 0) break;
-    const value = sanitizeUntrustedText(fields[key] ?? "", Math.min(MAX_FIELD_LENGTH, remaining));
+    const value = sanitizeUntrustedText(
+      (fields[key] ?? "").replace(/^\s*#{1,6}\s+/gmu, "Section: "),
+      Math.min(MAX_FIELD_LENGTH, remaining),
+    );
     if (value) {
       sanitized[key] = value;
       remaining -= value.length;
@@ -260,8 +340,92 @@ export function sanitizeUntrustedFields(
   return sanitized;
 }
 
+export function approvedPathBindingFields(paths: readonly string[]): {
+  approvedPaths: readonly string[];
+  scope: string;
+  acceptanceCriteria: string;
+} {
+  const approvedPaths = canonicalApprovedPaths(paths);
+  const binding = `${APPROVED_PATHS_BINDING_PREFIX}${JSON.stringify(approvedPaths)}`;
+  return {
+    approvedPaths,
+    scope: `${binding}\nModify only these exact repository-relative paths. No other path is in scope.`,
+    acceptanceCriteria:
+      `${binding}\nAll implementation and test changes are limited to these exact paths, ` +
+      "and the required quality gates pass.",
+  };
+}
+
+export function parseApprovedPathBinding(
+  fields: Readonly<Record<string, string>>,
+): readonly string[] | undefined {
+  const scope = parseApprovedPathLine(fields.scope);
+  const acceptance = parseApprovedPathLine(fields.acceptanceCriteria);
+  if (
+    scope === undefined ||
+    acceptance === undefined ||
+    scope.length !== acceptance.length ||
+    scope.some((candidate, index) => candidate !== acceptance[index])
+  ) {
+    return undefined;
+  }
+  return scope;
+}
+
 export function executionMarker(idempotencyKey: string): string {
   return `${EXECUTION_MARKER}\n<!-- one-cli:idempotency:${digest(idempotencyKey)} -->`;
+}
+
+function parseApprovedPathLine(value: string | undefined): readonly string[] | undefined {
+  if (!value) return undefined;
+  const line = value
+    .split(/\r?\n/u)
+    .find((candidate) => candidate.startsWith(APPROVED_PATHS_BINDING_PREFIX));
+  if (!line) return undefined;
+  try {
+    const parsed = JSON.parse(line.slice(APPROVED_PATHS_BINDING_PREFIX.length)) as unknown;
+    return Array.isArray(parsed) && parsed.every((candidate) => typeof candidate === "string")
+      ? canonicalApprovedPaths(parsed)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalApprovedPaths(paths: readonly string[]): readonly string[] {
+  if (paths.length === 0 || paths.length > 128) {
+    throw new Error("Approved path binding must contain between 1 and 128 paths");
+  }
+  const canonical = paths.map((candidate) => {
+    const value = candidate.replace(/\\/gu, "/").replace(/^\.\//u, "");
+    if (
+      !value ||
+      value.length > 512 ||
+      value.startsWith("/") ||
+      value.startsWith("-") ||
+      /^[A-Za-z]:\//u.test(value) ||
+      value.split("/").some((segment) => !segment || segment === "." || segment === "..")
+    ) {
+      throw new Error("Approved path binding contains an unsafe path");
+    }
+    return value;
+  });
+  if (new Set(canonical).size !== canonical.length) {
+    throw new Error("Approved path binding contains duplicate paths");
+  }
+  return canonical;
+}
+
+export function communityPromotionIdentity(
+  input: unknown,
+  registry: CommunityRegistry,
+): { key: string; marker: string; operationId: string } {
+  const finding = validateCommunityFinding(input, registry);
+  const key = `intake:community:${digest(
+    `${finding.sourceId}\n${finding.sourceUrl}\n${finding.originalCommunityNeed}\n` +
+      JSON.stringify(finding.approvedPaths),
+  )}:v2`;
+  return { key, marker: executionMarker(key), operationId: operationId(key) };
 }
 
 export function isTrustedExecutionIssue(issue: GitHubIssue, exactAuthor: string): boolean {
@@ -320,7 +484,20 @@ export function parseCommunityRegistry(input: unknown): CommunityRegistry {
     if (ids.has(source.id)) throw new Error(`Duplicate community source id: ${source.id}`);
     ids.add(source.id);
     for (const url of sourceUrls(source)) assertSafeResearchUrl(url);
+    const repository = OFFICIAL_COMMUNITY_REPOSITORIES[source.id];
+    if (
+      source.repository !== repository ||
+      source.releases !== `${repository}/releases` ||
+      source.discussions !== `${repository}/discussions`
+    ) {
+      throw new Error(`Community source ${source.id} does not use its official GitHub endpoints`);
+    }
+    if (new Set(source.topics).size !== source.topics.length) {
+      throw new Error(`Duplicate capability topic for community source: ${source.id}`);
+    }
   }
+  const missing = COMMUNITY_SOURCE_IDS.filter((id) => !ids.has(id));
+  if (missing.length > 0) throw new Error(`Community registry is missing sources: ${missing.join(", ")}`);
   return registry;
 }
 
@@ -337,6 +514,7 @@ export function validateCommunityFinding(
   }
   return {
     ...finding,
+    approvedPaths: canonicalApprovedPaths(finding.approvedPaths),
     title: requiredSanitized(finding.title, "community title", MAX_TITLE_LENGTH),
     observedVersionOrDate: requiredSanitized(
       finding.observedVersionOrDate,
@@ -408,6 +586,24 @@ export class TrustedIntake {
     let retried = 0;
     let inDoubt = 0;
     for (const operation of this.dependencies.store.listOperations()) {
+      if (operation.state === "succeeded") {
+        const issueNumber = resultIssueNumber(operation.result);
+        const finding = this.dependencies.store.getGapFindingByOperationId(operation.id);
+        if (
+          issueNumber !== undefined &&
+          finding &&
+          ["retryable", "in_doubt"].includes(finding.status)
+        ) {
+          const result = jsonObject(operation.result ?? null);
+          this.reconcileBoundGapFinding(
+            operation,
+            issueNumber,
+            result.created === false ? "duplicate" : "promoted",
+          );
+          reconciled += 1;
+        }
+        continue;
+      }
       if (
         operation.state !== "reserved" ||
         ![
@@ -421,6 +617,7 @@ export class TrustedIntake {
       const request = jsonObject(operation.request);
       const marker = typeof request.marker === "string" ? request.marker : undefined;
       if (!marker) {
+        this.markBoundGapInDoubt(operation, "reserved operation has no reconciliation marker");
         inDoubt += 1;
         continue;
       }
@@ -434,12 +631,27 @@ export class TrustedIntake {
           this.dependencies.store.reconcileOperation({
             idempotencyKey: operation.idempotencyKey,
             state: "succeeded",
-            result: { issueNumber: lookup.issue.number, marker },
+            result: {
+              issueNumber: lookup.issue.number,
+              marker,
+              created: this.writeBegan(operation),
+            },
           });
+          this.reconcileBoundGapFinding(
+            operation,
+            lookup.issue.number,
+            this.writeBegan(operation) ? "promoted" : "duplicate",
+          );
           reconciled += 1;
           continue;
         }
         if (!lookup.absenceProven || this.writeBegan(operation)) {
+          this.markBoundGapInDoubt(
+            operation,
+            lookup.absenceProven
+              ? "GitHub write began but no marker is currently visible"
+              : "GitHub marker absence could not be proven",
+          );
           inDoubt += 1;
           continue;
         }
@@ -474,6 +686,7 @@ export class TrustedIntake {
       await this.retryCommentOperation(operation, request, marker, issueNumber, signal);
       retried += 1;
       } catch (error) {
+        this.markBoundGapInDoubt(operation, "GitHub marker reconciliation was inconclusive");
         inDoubt += 1;
         this.dependencies.store.appendEvent({
           aggregateType: "operation",
@@ -513,18 +726,19 @@ export class TrustedIntake {
 
   async promoteCommunityFinding(input: CommunityPromotionInput): Promise<PromotionResult> {
     const finding = validateCommunityFinding(input.finding, input.registry);
-    const key = `intake:community:${digest(
-      `${finding.sourceId}\n${finding.sourceUrl}\n${finding.originalCommunityNeed}`,
-    )}:v1`;
-    const marker = executionMarker(key);
+    const { key, marker } = communityPromotionIdentity(finding, input.registry);
+    const pathBinding = approvedPathBindingFields(finding.approvedPaths);
     const fields = this.executionFields(input.normalizedFields, {
       sourceType: "community",
       sourceLinkOrEvidence: [
         finding.sourceUrl,
         `Observed: ${finding.observedVersionOrDate}`,
+        `${APPROVED_PATHS_BINDING_PREFIX}${JSON.stringify(pathBinding.approvedPaths)}`,
         marker,
       ].join("\n"),
       problemStatement: finding.originalCommunityNeed,
+      scope: pathBinding.scope,
+      acceptanceCriteria: pathBinding.acceptanceCriteria,
       duplicateSearchEvidence: finding.duplicateSearchEvidence,
     });
     return await this.promote({
@@ -609,6 +823,7 @@ export class TrustedIntake {
         executionIssue: duplicate,
         idempotencyKey: input.key,
         marker: input.marker,
+        operationId: operationId(input.key),
       };
     }
 
@@ -633,9 +848,19 @@ export class TrustedIntake {
           executionIssueNumber: issueNumber,
           idempotencyKey: input.key,
           marker: input.marker,
+          operationId: reservation.operation.id,
         };
       }
-      throw new Error(`Promotion ${input.key} is already reserved and requires reconciliation`);
+      if (this.writeBegan(reservation.operation)) {
+        throw new IntakeWriteInDoubtError(
+          reservation.operation.id,
+          `Promotion ${input.key} has an uncertain reserved write`,
+        );
+      }
+      throw new IntakePromotionRetryableError(
+        reservation.operation.id,
+        `Promotion ${input.key} is reserved and awaits reconciliation`,
+      );
     }
 
     let created: GitHubIssue;
@@ -649,7 +874,7 @@ export class TrustedIntake {
       this.dependencies.store.reconcileOperation({
         idempotencyKey: input.key,
         state: "succeeded",
-        result: { issueNumber: created.number, marker: input.marker },
+        result: { issueNumber: created.number, marker: input.marker, created: true },
       });
     } catch (error) {
       this.dependencies.store.appendEvent({
@@ -658,7 +883,10 @@ export class TrustedIntake {
         type: "operation.write-outcome-uncertain",
         data: { error: errorMessage(error) },
       });
-      throw error;
+      throw new IntakeWriteInDoubtError(
+        reservation.operation.id,
+        "GitHub execution issue write outcome is uncertain",
+      );
     }
 
     if (input.originalIssueNumber !== undefined) {
@@ -670,6 +898,7 @@ export class TrustedIntake {
       executionIssue: created,
       idempotencyKey: input.key,
       marker: input.marker,
+      operationId: reservation.operation.id,
     };
   }
 
@@ -728,6 +957,40 @@ export class TrustedIntake {
     });
   }
 
+  private reconcileBoundGapFinding(
+    operation: Operation,
+    issueNumber: number,
+    status: "promoted" | "duplicate",
+  ): void {
+    const finding = this.dependencies.store.getGapFindingByOperationId(operation.id);
+    if (!finding) return;
+    this.dependencies.store.updateGapFinding({
+      fingerprint: finding.fingerprint,
+      status,
+      retryAfter: null,
+      evidence: {
+        ...jsonObject(finding.evidence),
+        promotion: { status, executionIssueNumber: issueNumber, operationId: operation.id },
+      },
+    });
+  }
+
+  private markBoundGapInDoubt(operation: Operation, reason: string): void {
+    const finding = this.dependencies.store.getGapFindingByOperationId(operation.id);
+    if (!finding || ["promoted", "duplicate", "blocked", "rejected", "expired"].includes(finding.status)) {
+      return;
+    }
+    this.dependencies.store.updateGapFinding({
+      fingerprint: finding.fingerprint,
+      status: "in_doubt",
+      retryAfter: null,
+      evidence: {
+        ...jsonObject(finding.evidence),
+        promotion: { status: "in_doubt", operationId: operation.id, reason },
+      },
+    });
+  }
+
   private async retryCreateOperation(
     original: Operation,
     request: Record<string, JsonValue>,
@@ -740,6 +1003,23 @@ export class TrustedIntake {
       kind: original.kind,
       request: { ...request, originalOperationId: original.id },
     });
+    const boundFinding = this.dependencies.store.getGapFindingByOperationId(original.id);
+    if (boundFinding) {
+      this.dependencies.store.updateGapFinding({
+        fingerprint: boundFinding.fingerprint,
+        status: "retryable",
+        operationId: retry.operation.id,
+        retryAfter: null,
+        evidence: {
+          ...jsonObject(boundFinding.evidence),
+          promotion: {
+            status: "retryable",
+            operationId: retry.operation.id,
+            supersedesOperationId: original.id,
+          },
+        },
+      });
+    }
     this.dependencies.store.reconcileOperation({
       idempotencyKey: original.idempotencyKey,
       state: "failed",
@@ -762,6 +1042,7 @@ export class TrustedIntake {
         state: "succeeded",
         result: { issueNumber: issue.number, marker, originalOperationId: original.id },
       });
+      this.reconcileBoundGapFinding(retry.operation, issue.number, "promoted");
     } catch (error) {
       this.dependencies.store.appendEvent({
         aggregateType: "operation",
@@ -769,6 +1050,21 @@ export class TrustedIntake {
         type: "operation.write-outcome-uncertain",
         data: { error: errorMessage(error) },
       });
+      const finding = this.dependencies.store.getGapFindingByOperationId(retry.operation.id);
+      if (finding) {
+        this.dependencies.store.updateGapFinding({
+          fingerprint: finding.fingerprint,
+          status: "in_doubt",
+          evidence: {
+            ...jsonObject(finding.evidence),
+            promotion: {
+              status: "in_doubt",
+              operationId: retry.operation.id,
+              reason: "GitHub retry write outcome is uncertain",
+            },
+          },
+        });
+      }
     }
   }
 
@@ -863,9 +1159,7 @@ function requiredSanitized(value: string, label: string, maxLength = MAX_FIELD_L
 }
 
 function sourceUrls(source: CommunitySource): string[] {
-  return [source.repository, source.documentation, source.releases, source.discussions].filter(
-    (value): value is string => value !== undefined,
-  );
+  return [source.repository, source.documentation.url, source.releases, source.discussions];
 }
 
 function assertSafeResearchUrl(value: string): void {

@@ -2,9 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createGitHubRuntimeAdapters,
   dispatchAutonomyCli,
   readWorkspaceJson,
 } from "../../src/autonomy/cli.js";
+import { loadAutonomyConfig } from "../../src/autonomy/config.js";
+import type { GitHubGraphqlTransport } from "../../src/autonomy/github-graphql.js";
+import type { GitHubTransport } from "../../src/autonomy/github.js";
+import { AutonomyStore } from "../../src/autonomy/store.js";
 import { main } from "../../src/cli.js";
 import { makeTempDir, removeTempDir } from "../helpers.js";
 
@@ -104,6 +109,94 @@ describe("autonomy CLI dispatch", () => {
     } finally {
       removeTempDir(workspace);
       removeTempDir(outside);
+    }
+  });
+
+  it("composes active GitHub research but keeps observe composition read-only", () => {
+    const home = makeTempDir("autonomy-cli-composition");
+    const repo = path.resolve(import.meta.dirname, "../..");
+    const store = new AutonomyStore(":memory:");
+    const rest = { request: vi.fn() } as unknown as GitHubTransport;
+    const graphql = { request: vi.fn() } as unknown as GitHubGraphqlTransport;
+    try {
+      const active = loadAutonomyConfig(repo, {
+        env: { ONE_CLI_HOME: home },
+        mode: "propose",
+      });
+      expect(
+        createGitHubRuntimeAdapters(active, store, { rest, graphql }).research,
+      ).toBeDefined();
+      const observe = loadAutonomyConfig(repo, {
+        env: { ONE_CLI_HOME: home },
+        mode: "observe",
+      });
+      expect(
+        createGitHubRuntimeAdapters(observe, store, { rest, graphql }).research,
+      ).toBeUndefined();
+      expect(rest.request).not.toHaveBeenCalled();
+      expect(graphql.request).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+      removeTempDir(home);
+    }
+  });
+
+  it("reports the nine-source monitoring inventory in status and events", async () => {
+    const home = makeTempDir("autonomy-cli-status");
+    vi.stubEnv("ONE_CLI_HOME", home);
+    const output = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const repo = path.resolve(import.meta.dirname, "../..");
+    try {
+      await expect(
+        dispatchAutonomyCli(["status", "--workspace", repo, "--output", "json"]),
+      ).resolves.toBe(0);
+      await expect(
+        dispatchAutonomyCli(["events", "--workspace", repo, "--output", "json"]),
+      ).resolves.toBe(0);
+      const rendered = output.mock.calls.map(([value]) => String(value)).join("");
+      expect(rendered).toContain('"activeSourceCount": 9');
+      expect(rendered).toContain('"baselinedSourceCount": 0');
+      expect(rendered).toContain('"monitoring"');
+    } finally {
+      removeTempDir(home);
+    }
+  });
+
+  it("observes absent or existing state without filesystem mutation", async () => {
+    const parent = makeTempDir("autonomy-cli-observe");
+    const missingHome = path.join(parent, "missing-home");
+    const repo = path.resolve(import.meta.dirname, "../..");
+    const output = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      vi.stubEnv("ONE_CLI_HOME", missingHome);
+      await expect(
+        dispatchAutonomyCli(["status", "--workspace", repo, "--mode", "observe", "--output", "json"]),
+      ).resolves.toBe(0);
+      expect(fs.existsSync(missingHome)).toBe(false);
+
+      const existingHome = path.join(parent, "existing-home");
+      const config = loadAutonomyConfig(repo, { env: { ONE_CLI_HOME: existingHome } });
+      const databasePath = path.join(config.stateRoot, "state.sqlite");
+      const store = new AutonomyStore(databasePath);
+      store.appendEvent({
+        aggregateType: "test",
+        aggregateId: "observe",
+        type: "test.persisted",
+      });
+      store.close();
+      const before = {
+        bytes: fs.readFileSync(databasePath),
+        mtimeMs: fs.statSync(databasePath).mtimeMs,
+      };
+      vi.stubEnv("ONE_CLI_HOME", existingHome);
+      await expect(
+        dispatchAutonomyCli(["status", "--workspace", repo, "--mode", "observe", "--output", "json"]),
+      ).resolves.toBe(0);
+      expect(fs.readFileSync(databasePath)).toEqual(before.bytes);
+      expect(fs.statSync(databasePath).mtimeMs).toBe(before.mtimeMs);
+      expect(output).toHaveBeenCalled();
+    } finally {
+      removeTempDir(parent);
     }
   });
 });

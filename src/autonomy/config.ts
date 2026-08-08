@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import { parseCommunityRegistry, type CommunityRegistry } from "./intake.js";
+import {
+  COMMUNITY_CAPABILITY_TOPICS,
+  parseCommunityRegistry,
+  type CommunityRegistry,
+} from "./intake.js";
 
 export const AUTONOMY_SCHEMA = "autonomy.one-cli/v1";
 export const AUTONOMY_MODES = ["observe", "propose", "auto-pr", "auto-merge"] as const;
@@ -128,6 +132,64 @@ const QualityGatesSchema = z
   })
   .strict();
 
+export const GAP_POLICY_SCHEMA = "autonomy.one-cli/gap-policy-v1";
+const ProtectedPathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !path.isAbsolute(value) && !value.split("/").includes(".."), {
+    message: "Protected governance paths must be repository-relative",
+  });
+export const GapPolicySchema = z
+  .object({
+    schema: z.literal(GAP_POLICY_SCHEMA),
+    categories: z.tuple([
+      z.literal("project-monitoring"),
+      z.literal("interactive-coding-agent"),
+      z.literal("long-sessions-context"),
+      z.literal("extensions-parallelism"),
+      z.literal("provider-cost-governance"),
+      z.literal("safety-platform-testing-docs"),
+    ]),
+    confidenceThreshold: z.literal("likely"),
+    minimumScore: z.number().int().min(1).max(100),
+    maximumPromotionsPerTick: z.literal(1),
+    findingTtlDays: z.number().int().min(1).max(365),
+    protectedGovernancePaths: z.array(ProtectedPathSchema).min(1),
+    directExecution: z
+      .object({
+        governance: z.literal("forbidden"),
+        speculative: z.literal("forbidden"),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (new Set(policy.protectedGovernancePaths).size !== policy.protectedGovernancePaths.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["protectedGovernancePaths"],
+        message: "Protected governance paths must be unique",
+      });
+    }
+    if (
+      policy.categories.some(
+        (category, index) => category !== COMMUNITY_CAPABILITY_TOPICS[index],
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["categories"],
+        message: "Gap categories must match the closed community capability taxonomy",
+      });
+    }
+  });
+export type GapPolicy = z.infer<typeof GapPolicySchema>;
+
+export function parseGapPolicy(input: unknown): GapPolicy {
+  return GapPolicySchema.parse(input);
+}
+
 export interface ConfiguredCommand {
   name: string;
   executable: string;
@@ -140,6 +202,7 @@ export interface AutonomyConfig {
   repoKey: string;
   stateRoot: string;
   policyHash: string;
+  researchPolicyHash: string;
   /** Maximum authority declared by trusted tracked configuration. */
   maximumMode: AutonomyMode;
   /** Authority selected for this invocation (defaults to propose). */
@@ -148,6 +211,7 @@ export interface AutonomyConfig {
   issuePolicy: z.infer<typeof IssuePolicySchema>;
   qualityGates: z.infer<typeof QualityGatesSchema>;
   community: CommunityRegistry;
+  gapPolicy: GapPolicy;
   commands: Readonly<Record<string, ConfiguredCommand>>;
 }
 
@@ -166,12 +230,20 @@ export function loadAutonomyConfig(
   const issuePolicyValue = readYaml(path.join(directory, "issue-policy.yml"));
   const qualityGatesValue = readYaml(path.join(directory, "quality-gates.yml"));
   const communityValue = readYaml(path.join(directory, "community.yml"));
-  rejectSecretKeys({ productValue, issuePolicyValue, qualityGatesValue, communityValue });
+  const gapPolicyValue = readYaml(path.join(directory, "gap-policy.yml"));
+  rejectSecretKeys({
+    productValue,
+    issuePolicyValue,
+    qualityGatesValue,
+    communityValue,
+    gapPolicyValue,
+  });
 
   const product = ProductSchema.parse(productValue);
   const issuePolicy = IssuePolicySchema.parse(issuePolicyValue);
   const qualityGates = QualityGatesSchema.parse(qualityGatesValue);
   const community = parseCommunityRegistry(communityValue);
+  const gapPolicy = parseGapPolicy(gapPolicyValue);
   if (
     product.execution.author !== issuePolicy.executionAuthor ||
     product.execution.author !== issuePolicy.authorization.apiAuthorExactMatch ||
@@ -205,24 +277,28 @@ export function loadAutonomyConfig(
   const environment = options.env ?? process.env;
   const home = environment.ONE_CLI_HOME ?? path.join(os.homedir(), ".one-cli");
   const stateRoot = path.join(path.resolve(home), "autonomy", repoKey);
-  fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
-  try {
-    fs.chmodSync(stateRoot, 0o700);
-  } catch {
-    // POSIX permissions are best-effort on non-POSIX filesystems.
+  if (mode !== "observe") {
+    fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(stateRoot, 0o700);
+    } catch {
+      // POSIX permissions are best-effort on non-POSIX filesystems.
+    }
   }
 
   return {
     repoRoot: canonicalRoot,
     repoKey,
     stateRoot,
-    policyHash: policyHash({ product, issuePolicy, qualityGates, community }),
+    policyHash: policyHash({ product, issuePolicy, qualityGates, community, gapPolicy }),
+    researchPolicyHash: policyHash({ community, gapPolicy }),
     maximumMode,
     mode,
     product,
     issuePolicy,
     qualityGates,
     community,
+    gapPolicy,
     commands,
   };
 }

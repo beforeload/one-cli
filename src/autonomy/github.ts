@@ -740,7 +740,9 @@ export function normalizedIssueFields(
     const heading = headings[index]!;
     const start = (heading.index ?? 0) + heading[0].length;
     const end = headings[index + 1]?.index ?? issue.body.length;
-    fields[toFieldName(heading[1]!)] = issue.body.slice(start, end).trim();
+    const field = toFieldName(heading[1]!);
+    if (Object.hasOwn(fields, field)) return undefined;
+    fields[field] = issue.body.slice(start, end).trim();
   }
   if (requiredFields.some((field) => !fields[field]?.trim())) return undefined;
   return fields;

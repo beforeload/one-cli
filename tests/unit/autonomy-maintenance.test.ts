@@ -1,6 +1,17 @@
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AutonomyConfig } from "../../src/autonomy/config.js";
+import {
+  collectLocalCapabilityEvidence,
+  gapTaxonomyAuthority,
+} from "../../src/autonomy/gap.js";
 import type { GitHubIssue, GitHubPort } from "../../src/autonomy/github.js";
+import { GitHubReadTransientError } from "../../src/autonomy/github-read.js";
+import type { CommunitySource, ResearchPort } from "../../src/autonomy/intake.js";
+import {
+  IntakeWriteInDoubtError,
+  type TrustedIntake,
+} from "../../src/autonomy/intake.js";
 import {
   MaintenanceCoordinator,
   type MaintenanceDependencies,
@@ -149,17 +160,215 @@ describe("MaintenanceCoordinator", () => {
     expect(harness.sandbox.run).not.toHaveBeenCalled();
     expect(harness.store.listEvents({ aggregateType: "maintenance" })).toHaveLength(0);
   });
+
+  it("queues a scanned gap and promotes it only on the next tick", async () => {
+    let harness!: ReturnType<typeof createHarness>;
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const research = {
+      scan: vi.fn(async () => {
+        queueGap(harness.store, harness.config, source, "gap-one", 90);
+        return [];
+      }),
+    };
+    harness = createHarness({ sources: [source], research });
+    due(harness.store, "community-scan", harness.now());
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "community-scan",
+    });
+    expect(harness.intake.promoteCommunityFinding).not.toHaveBeenCalled();
+    expect(harness.store.getGapFinding("gap-one")?.status).toBe("eligible");
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "succeeded",
+    });
+    expect(harness.intake.promoteCommunityFinding).toHaveBeenCalledTimes(1);
+    expect(harness.store.getGapFinding("gap-one")?.status).toBe("promoted");
+  });
+
+  it("returns the next tick to the ready queue after one gap promotion", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const harness = createHarness({ sources: [source] });
+    queueGap(harness.store, harness.config, source, "gap-high", 95);
+    queueGap(harness.store, harness.config, source, "gap-next", 90);
+
+    await harness.coordinator.tick(signal());
+    expect(harness.store.getGapFinding("gap-high")?.status).toBe("promoted");
+    expect(harness.store.getGapFinding("gap-next")?.status).toBe("eligible");
+    expect(harness.orchestrator.acquireNextIssue).not.toHaveBeenCalled();
+
+    await harness.coordinator.tick(signal());
+    expect(harness.orchestrator.acquireNextIssue).toHaveBeenCalledTimes(1);
+    expect(harness.intake.promoteCommunityFinding).toHaveBeenCalledTimes(1);
+    expect(harness.store.getGapFinding("gap-next")?.status).toBe("eligible");
+  });
+
+  it("marks an intake-reconciled existing execution issue as duplicate", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const harness = createHarness({ sources: [source], communityPromotionCreated: false });
+    queueGap(harness.store, harness.config, source, "gap-duplicate", 90);
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "succeeded",
+    });
+    expect(harness.store.getGapFinding("gap-duplicate")?.status).toBe("duplicate");
+  });
+
+  it("overrides provider path claims with the trusted taxonomy binding", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const harness = createHarness({ sources: [source] });
+    queueGap(harness.store, harness.config, source, "gap-path-binding", 90);
+    harness.findingNormalizer.normalize.mockResolvedValue({
+      ...normalizedFields(harness.config),
+      scope: "Modify src/unrelated.ts.",
+      acceptanceCriteria: "Only src/unrelated.ts needs to pass.",
+    });
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "succeeded",
+    });
+    const promoted = harness.intake.promoteCommunityFinding.mock.calls[0]?.[0];
+    expect(promoted?.normalizedFields.scope).toContain(
+      '["src/workspace.ts","tests/unit/workspace.test.ts"]',
+    );
+    expect(promoted?.normalizedFields.acceptanceCriteria).toContain(
+      '["src/workspace.ts","tests/unit/workspace.test.ts"]',
+    );
+    expect(JSON.stringify(promoted?.normalizedFields)).not.toContain("src/unrelated.ts");
+    expect(harness.store.getGapFinding("gap-path-binding")?.evidence).toMatchObject({
+      approvedPaths: ["src/workspace.ts", "tests/unit/workspace.test.ts"],
+    });
+  });
+
+  it("scans every registered source and defers a partial scan", async () => {
+    const sources = Array.from({ length: 9 }, (_, index) =>
+      communitySource(
+        `source-${index}`,
+        `https://github.com/acme/source-${index}`,
+      ),
+    );
+    const research = {
+      scan: vi.fn(async (source: CommunitySource) => {
+        if (String(source.id) === "source-3") throw new Error("private external prose");
+        return [];
+      }),
+    };
+    const harness = createHarness({ sources, research });
+    due(harness.store, "community-scan", harness.now());
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "community-scan-pending",
+      state: "waiting",
+    });
+    expect(research.scan.mock.calls.map(([source]) => source.id)).toEqual(
+      sources.map((source) => source.id),
+    );
+    expect(new AutonomyScheduler(harness.store, harness.config).due(harness.now()).communityScan)
+      .toBe(harness.now());
+    expect(JSON.stringify(harness.store.listEvents())).not.toContain("private external prose");
+  });
+
+  it("defers a rate-limited scan without advancing due", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const research = {
+      scan: vi.fn(async () => {
+        throw new GitHubReadTransientError("rate limit exceeded", new Error("secret"));
+      }),
+    };
+    const harness = createHarness({ sources: [source], research });
+    due(harness.store, "community-scan", harness.now());
+
+    await harness.coordinator.tick(signal());
+    expect(new AutonomyScheduler(harness.store, harness.config).due(harness.now()).communityScan)
+      .toBe(harness.now());
+    expect(
+      harness.store
+        .listEvents({ aggregateType: "maintenance" })
+        .find((event) => event.type === "maintenance.community-scan.partial")?.data,
+    ).toMatchObject({ reason: "rate limited" });
+  });
+
+  it("preempts a continuously ready queue once when a scan exceeds maximum lateness", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const research = {
+      scan: vi.fn(async () => {
+        throw new GitHubReadTransientError("rate limit exceeded", new Error("transient"));
+      }),
+    };
+    const harness = createHarness({ sources: [source], research, now: 10_000_000 });
+    harness.orchestrator.acquireNextIssue.mockResolvedValue({
+      action: "issue-selected",
+      state: "issue_selected",
+      detail: "selected continuously ready issue",
+    });
+    due(harness.store, "community-scan", harness.now() - 60 * 60_000 - 1);
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "community-scan-pending",
+    });
+    expect(harness.orchestrator.acquireNextIssue).not.toHaveBeenCalled();
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "issue-selected",
+    });
+    expect(harness.orchestrator.acquireNextIssue).toHaveBeenCalledTimes(1);
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "community-scan-pending",
+    });
+  });
+
+  it("keeps provider failures retryable and uncertain writes in doubt", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const providerFailure = createHarness({
+      sources: [source],
+      findingNormalizerError: new Error("provider timeout"),
+    });
+    queueGap(providerFailure.store, providerFailure.config, source, "gap-retry", 90);
+    await expect(providerFailure.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "waiting",
+    });
+    expect(providerFailure.store.getGapFinding("gap-retry")).toMatchObject({
+      status: "retryable",
+      retryCount: 1,
+    });
+
+    const uncertain = createHarness({
+      sources: [source],
+      communityPromotionError: new IntakeWriteInDoubtError(
+        "intake-uncertain",
+        "uncertain write",
+      ),
+    });
+    queueGap(uncertain.store, uncertain.config, source, "gap-uncertain", 90);
+    await expect(uncertain.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "in_doubt",
+    });
+    expect(uncertain.store.getGapFinding("gap-uncertain")).toMatchObject({
+      status: "in_doubt",
+      operationId: "intake-uncertain",
+    });
+  });
 });
 
 function createHarness(options: {
   issues?: GitHubIssue[];
   failCommand?: string;
   mode?: AutonomyConfig["mode"];
+  sources?: CommunitySource[];
+  research?: ResearchPort;
+  communityPromotionCreated?: boolean;
+  findingNormalizerError?: Error;
+  communityPromotionError?: Error;
+  now?: number;
 } = {}) {
   const store = new AutonomyStore(":memory:");
   stores.push(store);
-  const config = testConfig(options.mode ?? "auto-pr");
-  const now = () => 100_000;
+  const config = testConfig(options.mode ?? "auto-pr", options.sources ?? []);
+  const now = () => options.now ?? 100_000;
   const github = {
     listCandidateIssues: vi.fn(async (_repository, labels: readonly string[]) =>
       labels.includes("source:user") ? options.issues ?? [] : []),
@@ -189,11 +398,22 @@ function createHarness(options: {
     })),
   };
   const findingNormalizer = {
-    normalize: vi.fn(async () => normalizedFields(config)),
+    normalize: vi.fn(async () => {
+      if (options.findingNormalizerError) throw options.findingNormalizerError;
+      return normalizedFields(config);
+    }),
   };
   const intake = {
     promoteUserIssue: vi.fn(async () => promotion(50)),
-    promoteCommunityFinding: vi.fn(async () => promotion(51)),
+    promoteCommunityFinding: vi.fn(
+      async (_input: Parameters<TrustedIntake["promoteCommunityFinding"]>[0]) => {
+      if (options.communityPromotionError) throw options.communityPromotionError;
+      return {
+        ...promotion(51),
+        created: options.communityPromotionCreated ?? true,
+      };
+      },
+    ),
     promoteSelfDiscovery: vi.fn(async () => promotion(52)),
   };
   const git = {
@@ -222,6 +442,7 @@ function createHarness(options: {
     intake,
     issueNormalizer,
     findingNormalizer,
+    ...(options.research === undefined ? {} : { research: options.research }),
     now,
     id: (() => {
       let value = 0;
@@ -306,7 +527,88 @@ function userIssue(number: number): GitHubIssue {
   };
 }
 
-function testConfig(mode: AutonomyConfig["mode"]): AutonomyConfig {
+function communitySource(id: string, repository: string): CommunitySource {
+  return {
+    id,
+    name: id,
+    trust: "official-primary",
+    repository,
+    releases: `${repository}/releases`,
+    discussions: `${repository}/discussions`,
+    documentation: { url: `${repository}/docs`, kind: "official-documentation" },
+    topics: ["safety-platform-testing-docs"],
+  } as CommunitySource;
+}
+
+function queueGap(
+  store: AutonomyStore,
+  config: AutonomyConfig,
+  source: CommunitySource,
+  fingerprint: string,
+  score: number,
+): void {
+  const externalId = `${fingerprint}-commit`;
+  const sourceUrl = `${source.repository}/commit/${"b".repeat(40)}`;
+  const observation = store.upsertResearchObservation({
+    id: `observation-${fingerprint}`,
+    sourceId: source.id,
+    kind: "repository",
+    externalId,
+    sourceUrl,
+    sha: "b".repeat(40),
+    evidence: { title: "Parallel agents" },
+    observedAt: 100_000,
+    now: 100_000,
+  });
+  const classification = {
+    category: "safety-platform-testing-docs" as const,
+    topic: "platform-compatibility" as const,
+    subcode: "platform.compatibility" as const,
+  };
+  const localEvidence = collectLocalCapabilityEvidence(config.repoRoot, classification);
+  const candidate = {
+    observation: {
+      sourceId: source.id,
+      sourceUrl,
+      kind: "repository" as const,
+      externalId,
+      sha: "b".repeat(40),
+      title: "Windows platform compatibility",
+      body: "Cross-platform support for Windows and macOS.",
+      observedAt: 100_000,
+      incremental: true,
+    },
+    classification,
+    externalEvidence: "Official incremental repository evidence.",
+    localEvidence,
+    confidence: "confirmed" as const,
+    score,
+    testable: true,
+    dependencyStatus: "ready" as const,
+    proposedPaths: [...gapTaxonomyAuthority(classification).proposedPaths],
+    expiresAt: 100_000 + 30 * 24 * 60 * 60_000,
+  };
+  store.upsertGapFinding({
+    fingerprint,
+    sourceId: source.id,
+    observationId: observation.id,
+    category: classification.category,
+    topic: classification.topic,
+    subcode: classification.subcode,
+    evidence: { candidate },
+    score,
+    confidence: "confirmed",
+    status: "eligible",
+    policyHash: config.policyHash,
+    expiresAt: candidate.expiresAt,
+    now: 100_000,
+  });
+}
+
+function testConfig(
+  mode: AutonomyConfig["mode"],
+  sources: CommunitySource[] = [],
+): AutonomyConfig {
   const requiredFields = [
     "sourceType",
     "sourceLinkOrEvidence",
@@ -323,7 +625,7 @@ function testConfig(mode: AutonomyConfig["mode"]): AutonomyConfig {
     "dependencyOrder",
   ];
   return {
-    repoRoot: "/workspace",
+    repoRoot: path.resolve(import.meta.dirname, "../.."),
     repoKey: "acme-widget",
     stateRoot: "/state",
     policyHash: "policy",
@@ -337,7 +639,19 @@ function testConfig(mode: AutonomyConfig["mode"]): AutonomyConfig {
       },
     },
     issuePolicy: { normalization: { requiredFields } },
-    community: { sources: [] },
+    community: { sources },
+    gapPolicy: {
+      confidenceThreshold: "likely",
+      minimumScore: 70,
+      maximumPromotionsPerTick: 1,
+      findingTtlDays: 30,
+      protectedGovernancePaths: [
+        "AUTONOMY.md",
+        ".autonomy/**",
+        ".github/workflows/**",
+        ".github/CODEOWNERS",
+      ],
+    },
     commands: Object.fromEntries(
       ["install", "build", "integration", "smoke"].map((name) => [
         name,

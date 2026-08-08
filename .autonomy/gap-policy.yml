@@ -1,0 +1,23 @@
+schema: autonomy.one-cli/gap-policy-v1
+categories:
+  - project-monitoring
+  - interactive-coding-agent
+  - long-sessions-context
+  - extensions-parallelism
+  - provider-cost-governance
+  - safety-platform-testing-docs
+
+confidenceThreshold: likely
+minimumScore: 70
+maximumPromotionsPerTick: 1
+findingTtlDays: 30
+
+protectedGovernancePaths:
+  - AUTONOMY.md
+  - .autonomy/**
+  - .github/workflows/**
+  - .github/CODEOWNERS
+
+directExecution:
+  governance: forbidden
+  speculative: forbidden

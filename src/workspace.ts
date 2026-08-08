@@ -16,13 +16,22 @@ export interface FileSnapshot {
 
 export class Workspace {
   readonly root: string;
+  private readonly allowedWritePaths: ReadonlySet<string> | undefined;
 
-  constructor(root: string) {
+  constructor(root: string, options: { allowedWritePaths?: readonly string[] } = {}) {
     const canonical = fs.realpathSync(root);
     if (!fs.statSync(canonical).isDirectory()) {
       throw new Error(`Workspace is not a directory: ${root}`);
     }
     this.root = canonical;
+    if (options.allowedWritePaths !== undefined) {
+      if (options.allowedWritePaths.length === 0) {
+        throw new Error("Workspace write-path binding must not be empty");
+      }
+      this.allowedWritePaths = new Set(
+        options.allowedWritePaths.map((candidate) => this.lexical(candidate).relativePath),
+      );
+    }
   }
 
   private lexical(relativePath: string): { absolutePath: string; relativePath: string } {
@@ -98,6 +107,12 @@ export class Workspace {
   resolveWritable(relativePath: string): string {
     const resolved = this.lexical(relativePath);
     if (resolved.relativePath === ".") throw new Error("Workspace root is not a writable file");
+    if (
+      this.allowedWritePaths !== undefined &&
+      !this.allowedWritePaths.has(resolved.relativePath)
+    ) {
+      throw new Error(`Path is outside the approved write binding: ${resolved.relativePath}`);
+    }
     this.verifyChain(resolved.absolutePath, true);
     const parent = path.dirname(resolved.absolutePath);
     if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) {

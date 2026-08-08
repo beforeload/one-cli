@@ -1,12 +1,25 @@
 import crypto, { randomUUID } from "node:crypto";
 import type { ChatProvider } from "../domain.js";
 import type { AutonomyConfig } from "./config.js";
-import type { JsonValue, LeaseGrant } from "./domain.js";
+import type { JsonValue, LeaseGrant, ResearchKind } from "./domain.js";
+import {
+  GapCandidateSchema,
+  NORMALIZED_GAP_FIELDS,
+  collectLocalCapabilityEvidence,
+  evaluateDirectEligibility,
+  gapTaxonomyAuthority,
+  scoreGap,
+  type GapCandidate,
+} from "./gap.js";
 import type { GitRepository, GitWorktree } from "./git.js";
 import type { GitHubIssue, GitHubPort, GitHubRepositoryRef } from "./github.js";
 import {
   MAINTAINER_ACCEPTED_LABEL,
   USER_SOURCE_LABEL,
+  IntakePromotionRetryableError,
+  IntakeWriteInDoubtError,
+  approvedPathBindingFields,
+  communityPromotionIdentity,
   validateCommunityFinding,
   validateUserIssueForPromotion,
   type CommunityFinding,
@@ -17,8 +30,10 @@ import {
 import { LeaseConflictError, LeaseCoordinator } from "./lease.js";
 import type { IssueClaimInspection, TickResult } from "./orchestrator.js";
 import type { ProcessResult } from "./process.js";
+import { GitHubReadTransientError } from "./github-read.js";
 import {
   AutonomyScheduler,
+  COMMUNITY_SCAN_MAX_LATENESS_MS,
   computeNextScheduledAction,
   type ScheduleClaim,
 } from "./schedule.js";
@@ -28,6 +43,117 @@ import type { AutonomyStore } from "./store.js";
 const COORDINATOR_TTL_MS = 5 * 60_000;
 const NORMALIZER_MAX_BYTES = 64 * 1024;
 const GLOBAL_COMMANDS = ["install", "build", "integration", "smoke"] as const;
+const REQUIRED_RESEARCH_KINDS = ["repository", "release", "discussion"] as const;
+
+export interface CommunityMonitoringStatus {
+  activeSourceCount: number;
+  baselinedSourceCount: number;
+  queuedFindings: number;
+  promotableFindings: number;
+  retryableFindings: number;
+  inDoubtFindings: number;
+  blockedFindings: number;
+  lastSuccess: number | null;
+  nextDue: number;
+  pendingReason: string | null;
+  errorReason: string | null;
+  sources: readonly {
+    sourceId: string;
+    baselined: boolean;
+    checkpointKinds: readonly ResearchKind[];
+  }[];
+}
+
+export function communityMonitoringStatus(
+  config: Pick<AutonomyConfig, "community" | "policyHash" | "researchPolicyHash">,
+  store: AutonomyStore,
+  nextDue: number,
+  now = Date.now(),
+): CommunityMonitoringStatus {
+  const checkpoints = store
+    .listResearchCheckpoints()
+    .filter((checkpoint) => checkpoint.policyHash === config.researchPolicyHash);
+  const sources = config.community.sources.map((source) => {
+    const checkpointKinds = REQUIRED_RESEARCH_KINDS.filter((kind) =>
+      checkpoints.some(
+        (checkpoint) =>
+          checkpoint.sourceId === source.id &&
+          checkpoint.kind === kind &&
+          checkpoint.channelState === "baselined",
+      ),
+    );
+    return {
+      sourceId: source.id,
+      baselined: checkpointKinds.length === REQUIRED_RESEARCH_KINDS.length,
+      checkpointKinds,
+    };
+  });
+  const events = store.listEvents({
+    aggregateType: "maintenance",
+    limit: 10_000,
+  });
+  const scanEvents = events.filter((event) =>
+    [
+      "maintenance.community-scan.completed",
+      "maintenance.community-scan.partial",
+      "maintenance.community-scan.pending",
+    ].includes(event.type),
+  );
+  const lastSuccess =
+    [...scanEvents].reverse().find((event) => event.type === "maintenance.community-scan.completed")
+      ?.createdAt ?? null;
+  const latest = scanEvents.at(-1);
+  const latestData = latest ? jsonObject(latest.data) : {};
+  const pendingReason =
+    latest?.type === "maintenance.community-scan.pending"
+      ? safeMonitoringReason(latestData.reason, "scan pending")
+      : latest?.type === "maintenance.community-scan.partial"
+        ? "one or more source reads are incomplete"
+        : null;
+  const errorReason =
+    latest?.type === "maintenance.community-scan.partial"
+      ? safeMonitoringReason(latestData.reason, "source read failure")
+      : null;
+  return {
+    activeSourceCount: config.community.sources.length,
+    baselinedSourceCount: sources.filter((source) => source.baselined).length,
+    queuedFindings: store.listGapFindings({
+      status: "queued",
+      policyHash: config.policyHash,
+      now,
+      limit: 10_000,
+    }).length,
+    promotableFindings: store.listGapFindings({
+      status: "eligible",
+      policyHash: config.policyHash,
+      now,
+      limit: 10_000,
+    }).length,
+    retryableFindings: store.listGapFindings({
+      status: "retryable",
+      policyHash: config.policyHash,
+      now,
+      limit: 10_000,
+    }).length,
+    inDoubtFindings: store.listGapFindings({
+      status: "in_doubt",
+      policyHash: config.policyHash,
+      now,
+      limit: 10_000,
+    }).length,
+    blockedFindings: store.listGapFindings({
+      status: "blocked",
+      policyHash: config.policyHash,
+      now,
+      limit: 10_000,
+    }).length,
+    lastSuccess,
+    nextDue,
+    pendingReason,
+    errorReason,
+    sources,
+  };
+}
 
 export interface NormalizedIssue {
   title: string;
@@ -226,7 +352,22 @@ export class MaintenanceCoordinator {
     this.running = true;
     if (this.dependencies.config.mode === "observe") {
       try {
-        return await this.dependencies.orchestrator.observe(signal);
+        const observed = await this.dependencies.orchestrator.observe(signal);
+        const monitoring = communityMonitoringStatus(
+          this.dependencies.config,
+          this.dependencies.store,
+          this.scheduler.due(this.now()).communityScan,
+          this.now(),
+        );
+        return {
+          ...observed,
+          detail:
+            `Read-only inventory: ${monitoring.activeSourceCount} active sources, ` +
+            `${monitoring.baselinedSourceCount} baselined, ` +
+            `${monitoring.queuedFindings} queued, ${monitoring.promotableFindings} promotable, ` +
+            `${monitoring.retryableFindings} retryable, ${monitoring.inDoubtFindings} in doubt, ` +
+            `${monitoring.blockedFindings} blocked`,
+        };
       } finally {
         this.running = false;
       }
@@ -303,29 +444,48 @@ export class MaintenanceCoordinator {
         return result;
       }
 
+      const maximumLateness =
+        (this.dependencies.config.community.monitoring?.maximumLatenessMinutes ?? 60) * 60_000;
+      if (
+        due.communityScan + maximumLateness <= now &&
+        !this.scanPreemptionYieldRequired()
+      ) {
+        this.record("maintenance.community-scan.preempted-ready", {
+          dueAt: due.communityScan,
+          latenessMs: now - due.communityScan,
+          maximumLatenessMs: maximumLateness || COMMUNITY_SCAN_MAX_LATENESS_MS,
+        });
+        return await this.runScheduledCommunityScan(due, now, controller.signal, (claim) => {
+          scheduleClaim = claim;
+        });
+      }
+
+      this.dependencies.store.expireGapFindings(this.dependencies.config.policyHash, now);
+      const scanYield = this.scanPreemptionYieldRequired();
+      const readyQueueTurn = this.readyQueueTurnRequired() || scanYield;
+      if (!readyQueueTurn) {
+        const gapPromotion = await this.promoteOneGapFinding(controller.signal);
+        if (gapPromotion) return gapPromotion;
+      }
+
       const selected = await this.dependencies.orchestrator.acquireNextIssue(controller.signal);
+      if (readyQueueTurn) {
+        this.record("maintenance.ready-queue.turn", {
+          afterGapPromotion: true,
+          selected: selected.state !== "idle",
+        });
+        if (scanYield) {
+          this.record("maintenance.community-scan.ready-yield", {
+            selected: selected.state !== "idle",
+          });
+        }
+      }
       if (selected.state !== "idle") return selected;
 
       if (due.communityScan <= now) {
-        const action = computeNextScheduledAction({
-          now,
-          reconcileRequired: false,
-          due: { globalDogfood: due.globalDogfood, communityScan: due.communityScan },
-          hasActiveIssue: false,
-          hasPromotableUserIssue: false,
+        return await this.runScheduledCommunityScan(due, now, controller.signal, (claim) => {
+          scheduleClaim = claim;
         });
-        if (!action || action.kind !== "community-scan") {
-          throw new Error("Community scan was due but could not be scheduled");
-        }
-        scheduleClaim = this.scheduler.claim(action, now);
-        const result = await this.runCommunityScan(controller.signal);
-        if (result.action === "community-scan-pending") {
-          this.scheduler.defer(scheduleClaim, result.detail ?? "research capability unavailable", this.now());
-        } else {
-          this.scheduler.complete(scheduleClaim, this.now());
-        }
-        scheduleClaim = undefined;
-        return result;
       }
 
       if (heartbeatFailure) throw heartbeatFailure;
@@ -423,6 +583,265 @@ export class MaintenanceCoordinator {
         detail: `User issue #${issue.number} was not promoted: ${reason}`,
       };
     }
+  }
+
+  private async promoteOneGapFinding(signal: AbortSignal): Promise<TickResult | undefined> {
+    const finding = this.dependencies.store.selectGapFindings({
+      policyHash: this.dependencies.config.policyHash,
+      now: this.now(),
+      limit: 1,
+    })[0];
+    if (!finding) return undefined;
+
+    let terminalStatus:
+      | "promoted"
+      | "duplicate"
+      | "blocked"
+      | "retryable"
+      | "in_doubt" = "blocked";
+    let executionIssueNumber: number | undefined;
+    let reason = "promotion validation failed";
+    try {
+      if (!this.dependencies.findingNormalizer) {
+        throw new GapPromotionBlocked("finding normalizer is unavailable");
+      }
+      assertGapFieldContract(this.dependencies.config.issuePolicy.normalization.requiredFields);
+      const storedEvidence = jsonObject(finding.evidence);
+      const candidate = GapCandidateSchema.parse(storedEvidence.candidate);
+      const source = this.dependencies.config.community.sources.find(
+        (registered) => registered.id === finding.sourceId,
+      );
+      if (!source || candidate.observation.sourceId !== source.id) {
+        throw new GapPromotionBlocked("registered source binding changed");
+      }
+      const observation = this.dependencies.store.getResearchObservationById(
+        finding.observationId,
+      );
+      if (
+        !observation ||
+        observation.sourceId !== candidate.observation.sourceId ||
+        observation.kind !== candidate.observation.kind ||
+        observation.externalId !== candidate.observation.externalId ||
+        observation.sourceUrl !== candidate.observation.sourceUrl
+      ) {
+        throw new GapPromotionBlocked("source observation binding changed");
+      }
+      const localEvidence = collectLocalCapabilityEvidence(
+        this.dependencies.config.repoRoot,
+        candidate.classification,
+      );
+      const authority = gapTaxonomyAuthority(candidate.classification);
+      const refreshedCandidate: GapCandidate = {
+        ...candidate,
+        localEvidence,
+        score: scoreGap({
+          incremental: candidate.observation.incremental,
+          allowlistedSource: source.topics.includes(candidate.classification.category),
+          localEvidence,
+          confidence: candidate.confidence,
+          testable: candidate.testable && authority.testable,
+          dependencyReady:
+            candidate.dependencyStatus === authority.dependencyStatus &&
+            authority.dependencyStatus === "ready",
+        }),
+      };
+      const eligibility = evaluateDirectEligibility({
+        candidate: refreshedCandidate,
+        registry: this.dependencies.config.community,
+        policy: this.dependencies.config.gapPolicy,
+        now: this.now(),
+      });
+      if (!eligibility.directEligible) {
+        throw new GapPromotionBlocked(eligibility.reasons.join("; "));
+      }
+      const communityFinding = validateCommunityFinding(
+        communityFindingFromCandidate(refreshedCandidate),
+        this.dependencies.config.community,
+      );
+      const normalizedFields = await this.dependencies.findingNormalizer.normalize({
+        finding: communityFinding,
+        requiredFields: NORMALIZED_GAP_FIELDS,
+        signal,
+      });
+      assertExactGapFields(normalizedFields);
+      const trustedPathBinding = approvedPathBindingFields(authority.proposedPaths);
+      const boundNormalizedFields = {
+        ...normalizedFields,
+        scope: trustedPathBinding.scope,
+        acceptanceCriteria: trustedPathBinding.acceptanceCriteria,
+      };
+      const identity = communityPromotionIdentity(
+        communityFinding,
+        this.dependencies.config.community,
+      );
+      this.dependencies.store.updateGapFinding({
+        fingerprint: finding.fingerprint,
+        status: "retryable",
+        operationId: identity.operationId,
+        retryAfter: null,
+        evidence: toJson({
+          ...storedEvidence,
+          candidate: refreshedCandidate,
+          approvedPaths: [...trustedPathBinding.approvedPaths],
+          promotion: {
+            status: "retryable",
+            operationId: identity.operationId,
+            reason: "promotion operation reserved for reconciliation",
+          },
+        }),
+        now: this.now(),
+      });
+      const promotion = await this.dependencies.intake.promoteCommunityFinding({
+        finding: communityFinding,
+        registry: this.dependencies.config.community,
+        normalizedFields: boundNormalizedFields,
+        signal,
+      });
+      terminalStatus = promotion.created ? "promoted" : "duplicate";
+      executionIssueNumber = promotion.executionIssueNumber;
+      reason = promotion.created ? "execution issue created" : "execution issue already exists";
+      this.dependencies.store.updateGapFinding({
+        fingerprint: finding.fingerprint,
+        status: terminalStatus,
+        evidence: toJson({
+          ...storedEvidence,
+          candidate: refreshedCandidate,
+          approvedPaths: [...trustedPathBinding.approvedPaths],
+          promotion: {
+            status: terminalStatus,
+            executionIssueNumber: promotion.executionIssueNumber,
+            operationId: promotion.operationId ?? identity.operationId,
+          },
+        }),
+        operationId: promotion.operationId ?? identity.operationId,
+        retryAfter: null,
+        now: this.now(),
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      reason = safeGapPromotionReason(error);
+      const deterministic =
+        error instanceof GapPromotionBlocked ||
+        (error instanceof Error && error.name === "ZodError");
+      terminalStatus =
+        deterministic
+          ? "blocked"
+          : error instanceof IntakeWriteInDoubtError
+            ? "in_doubt"
+            : "retryable";
+      const retryCount = Math.min(finding.retryCount + 1, 10);
+      const retryAfter =
+        terminalStatus === "retryable"
+          ? this.now() + Math.min(60 * 60_000, 30_000 * 2 ** Math.min(retryCount - 1, 7))
+          : null;
+      this.dependencies.store.updateGapFinding({
+        fingerprint: finding.fingerprint,
+        status: terminalStatus,
+        ...(error instanceof IntakeWriteInDoubtError ||
+        error instanceof IntakePromotionRetryableError
+          ? { operationId: error.operationId }
+          : {}),
+        retryCount,
+        retryAfter,
+        evidence: toJson({
+          ...jsonObject(
+            this.dependencies.store.getGapFinding(finding.fingerprint)?.evidence ??
+              finding.evidence,
+          ),
+          promotion: {
+            status: terminalStatus,
+            reason,
+            retryCount,
+            retryAfter,
+            operationId:
+              error instanceof IntakeWriteInDoubtError ||
+              error instanceof IntakePromotionRetryableError
+                ? error.operationId
+                : finding.operationId,
+          },
+        }),
+        now: this.now(),
+      });
+    }
+
+    this.record("maintenance.gap-promotion.turn", {
+      fingerprint: finding.fingerprint,
+      sourceId: finding.sourceId,
+      status: terminalStatus,
+      executionIssueNumber: executionIssueNumber ?? null,
+      reason,
+    });
+    return {
+      action: "gap-promotion",
+      state:
+        terminalStatus === "blocked"
+          ? "blocked"
+          : terminalStatus === "in_doubt"
+            ? "in_doubt"
+            : terminalStatus === "retryable"
+              ? "waiting"
+              : "succeeded",
+      detail:
+        terminalStatus === "promoted"
+          ? `Promoted gap ${finding.fingerprint.slice(0, 12)} to #${executionIssueNumber}`
+          : terminalStatus === "duplicate"
+            ? `Reconciled gap ${finding.fingerprint.slice(0, 12)} with #${executionIssueNumber}`
+            : `${terminalStatus} gap ${finding.fingerprint.slice(0, 12)}: ${reason}`,
+    };
+  }
+
+  private readyQueueTurnRequired(): boolean {
+    let pending = false;
+    for (const event of this.dependencies.store.listEvents({
+      aggregateType: "maintenance",
+      aggregateId: this.dependencies.config.repoKey,
+      limit: 10_000,
+    })) {
+      if (event.type === "maintenance.gap-promotion.turn") pending = true;
+      if (event.type === "maintenance.ready-queue.turn") pending = false;
+    }
+    return pending;
+  }
+
+  private scanPreemptionYieldRequired(): boolean {
+    let pending = false;
+    for (const event of this.dependencies.store.listEvents({
+      aggregateType: "maintenance",
+      aggregateId: this.dependencies.config.repoKey,
+      limit: 10_000,
+    })) {
+      if (event.type === "maintenance.community-scan.preempted-ready") pending = true;
+      if (event.type === "maintenance.community-scan.ready-yield") pending = false;
+    }
+    return pending;
+  }
+
+  private async runScheduledCommunityScan(
+    due: { globalDogfood: number; communityScan: number },
+    now: number,
+    signal: AbortSignal,
+    setClaim: (claim: ScheduleClaim | undefined) => void,
+  ): Promise<TickResult> {
+    const action = computeNextScheduledAction({
+      now,
+      reconcileRequired: false,
+      due,
+      hasActiveIssue: false,
+      hasPromotableUserIssue: false,
+    });
+    if (!action || action.kind !== "community-scan") {
+      throw new Error("Community scan was due but could not be scheduled");
+    }
+    const claim = this.scheduler.claim(action, now);
+    setClaim(claim);
+    const result = await this.runCommunityScan(signal);
+    if (result.action === "community-scan-pending") {
+      this.scheduler.defer(claim, result.detail ?? "research capability unavailable", this.now());
+    } else {
+      this.scheduler.complete(claim, this.now());
+    }
+    setClaim(undefined);
+    return result;
   }
 
   private async runGlobalDogfood(signal: AbortSignal): Promise<TickResult> {
@@ -552,7 +971,7 @@ export class MaintenanceCoordinator {
   private async runCommunityScan(signal: AbortSignal): Promise<TickResult> {
     if (!this.dependencies.research) {
       this.record("maintenance.community-scan.pending", {
-        reason: "ResearchPort is unavailable",
+        reason: "research capability unavailable",
       });
       return {
         action: "community-scan-pending",
@@ -560,67 +979,87 @@ export class MaintenanceCoordinator {
         detail: "ResearchPort is unavailable; community scan remains due",
       };
     }
-    try {
-      let selected: CommunityFinding | undefined;
-      let invalid = 0;
-      for (const source of this.dependencies.config.community.sources) {
+    const before = this.dependencies.store.listGapFindings({
+      policyHash: this.dependencies.config.policyHash,
+      includeExpired: true,
+      limit: 10_000,
+    }).length;
+    const failures: Array<{ sourceId: string; reason: string }> = [];
+    let returnedFindings = 0;
+    let invalid = 0;
+    for (const source of this.dependencies.config.community.sources) {
+      try {
         const results = await this.dependencies.research.scan(source, signal);
         if (!Array.isArray(results)) throw new Error("ResearchPort returned a non-array result");
         for (const result of results) {
           try {
-            const finding = validateCommunityFinding(result, this.dependencies.config.community);
-            selected ??= finding;
-          } catch (error) {
+            validateCommunityFinding(result, this.dependencies.config.community);
+            returnedFindings += 1;
+          } catch {
             invalid += 1;
             this.record("maintenance.community-finding.blocked", {
               sourceId: source.id,
-              reason: errorMessage(error),
+              reason: "finding contract validation failed",
             });
           }
         }
+      } catch (error) {
+        if (signal.aborted) throw error;
+        failures.push({ sourceId: source.id, reason: safeScanFailure(error) });
       }
-      if (!selected) {
-        this.record("maintenance.community-scan.completed", { findings: 0, invalid });
-        return {
-          action: "community-scan",
-          state: "succeeded",
-          detail: `Community scan completed with no promotable finding (${invalid} invalid)`,
-        };
-      }
-      if (!this.dependencies.findingNormalizer) {
-        throw new Error("Finding normalizer is unavailable");
-      }
-      const normalizedFields = await this.dependencies.findingNormalizer.normalize({
-        finding: selected,
-        requiredFields: this.dependencies.config.issuePolicy.normalization.requiredFields,
-        signal,
+    }
+    const after = this.dependencies.store.listGapFindings({
+      policyHash: this.dependencies.config.policyHash,
+      includeExpired: true,
+      limit: 10_000,
+    }).length;
+    const baselined = this.dependencies.config.community.sources.filter((source) =>
+      REQUIRED_RESEARCH_KINDS.every(
+        (kind) =>
+          this.dependencies.store.getResearchCheckpoint(source.id, kind)?.policyHash ===
+            this.dependencies.config.researchPolicyHash &&
+          this.dependencies.store.getResearchCheckpoint(source.id, kind)?.channelState ===
+            "baselined",
+      ),
+    ).length;
+    if (failures.length > 0) {
+      const reason = failures.some((failure) => failure.reason === "rate limited")
+        ? "rate limited"
+        : failures.some((failure) => failure.reason === "transient source read failure")
+          ? "transient source read failure"
+          : "source read failure";
+      this.record("maintenance.community-scan.partial", {
+        sourcesAttempted: this.dependencies.config.community.sources.length,
+        sourcesFailed: failures.map((failure) => ({
+          sourceId: failure.sourceId,
+          reason: failure.reason,
+        })),
+        baselinedSources: baselined,
+        queuedCandidates: Math.max(0, after - before),
+        reason,
       });
-      const promoted = await this.dependencies.intake.promoteCommunityFinding({
-        finding: selected,
-        registry: this.dependencies.config.community,
-        normalizedFields,
-        signal,
-      });
-      this.record("maintenance.community-scan.completed", {
-        findings: 1,
-        invalid,
-        executionIssueNumber: promoted.executionIssueNumber,
-        created: promoted.created,
-      });
-      return {
-        action: "community-scan",
-        state: "succeeded",
-        detail: `Promoted community finding to #${promoted.executionIssueNumber}`,
-      };
-    } catch (error) {
-      const reason = errorMessage(error);
-      this.record("maintenance.community-scan.pending", { reason });
       return {
         action: "community-scan-pending",
         state: "waiting",
-        detail: `Community scan remains due: ${reason}`,
+        detail:
+          `Community scan incomplete: ${failures.length} of ` +
+          `${this.dependencies.config.community.sources.length} source reads failed`,
       };
     }
+    this.record("maintenance.community-scan.completed", {
+      sourcesScanned: this.dependencies.config.community.sources.length,
+      baselinedSources: baselined,
+      queuedCandidates: Math.max(0, after - before),
+      returnedFindings,
+      invalid,
+    });
+    return {
+      action: "community-scan",
+      state: "succeeded",
+      detail:
+        `Scanned all ${this.dependencies.config.community.sources.length} community sources; ` +
+        `queued ${Math.max(0, after - before)} candidates`,
+    };
   }
 
   private handledUserIssues(): Map<number, string> {
@@ -666,6 +1105,83 @@ class DogfoodFailure extends Error {
     super(message);
     this.name = "DogfoodFailure";
   }
+}
+
+class GapPromotionBlocked extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GapPromotionBlocked";
+  }
+}
+
+function communityFindingFromCandidate(candidate: GapCandidate): CommunityFinding {
+  return {
+    sourceId: candidate.observation.sourceId,
+    sourceUrl: candidate.observation.sourceUrl,
+    observedVersionOrDate:
+      candidate.observation.sha ?? new Date(candidate.observation.observedAt).toISOString(),
+    title: candidate.observation.title,
+    originalCommunityNeed: candidate.observation.body,
+    productComparison: candidate.localEvidence.summary,
+    duplicateSearchEvidence:
+      `Stable incremental evidence ${candidate.observation.externalId} was checked against ` +
+      "research checkpoints, prior observations, and gap fingerprints.",
+    approvedPaths: [...candidate.proposedPaths],
+    inScope: true,
+    testableImprovement: true,
+  };
+}
+
+function assertGapFieldContract(requiredFields: readonly string[]): void {
+  if (
+    requiredFields.length !== NORMALIZED_GAP_FIELDS.length ||
+    NORMALIZED_GAP_FIELDS.some((field) => !requiredFields.includes(field))
+  ) {
+    throw new GapPromotionBlocked("normalization policy does not require the exact gap fields");
+  }
+}
+
+function assertExactGapFields(fields: Readonly<Record<string, string>>): void {
+  const keys = Object.keys(fields);
+  if (
+    keys.length !== NORMALIZED_GAP_FIELDS.length ||
+    NORMALIZED_GAP_FIELDS.some(
+      (field) => !Object.hasOwn(fields, field) || typeof fields[field] !== "string" || !fields[field]!.trim(),
+    )
+  ) {
+    throw new GapPromotionBlocked("normalizer did not return the exact gap fields");
+  }
+}
+
+function safeGapPromotionReason(error: unknown): string {
+  if (error instanceof GapPromotionBlocked) return error.message.slice(0, 1_000);
+  if (error instanceof Error && error.name === "ZodError") return "stored candidate contract is invalid";
+  return "normalization or intake failed";
+}
+
+function safeScanFailure(error: unknown): string {
+  if (error instanceof GitHubReadTransientError) {
+    return /\brate limit/iu.test(error.message)
+      ? "rate limited"
+      : "transient source read failure";
+  }
+  return "source read failure";
+}
+
+function safeMonitoringReason(value: JsonValue | undefined, fallback: string): string {
+  if (
+    typeof value === "string" &&
+    [
+      "research capability unavailable",
+      "rate limited",
+      "transient source read failure",
+      "source read failure",
+      "scan pending",
+    ].includes(value)
+  ) {
+    return value;
+  }
+  return fallback;
 }
 
 async function providerJson(

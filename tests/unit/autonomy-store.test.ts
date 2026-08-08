@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ApprovalBinding } from "../../src/autonomy/domain.js";
 import { LeaseConflictError, LeaseLostError } from "../../src/autonomy/lease.js";
@@ -282,5 +284,123 @@ describe("AutonomyStore", () => {
     store = new AutonomyStore(databasePath);
     const afterReopen = store.listEvents({ afterSeq: appended.seq - 1 });
     expect(afterReopen).toEqual(beforeClose);
+  });
+
+  it("upserts research baselines, observations, and selectable gap findings", () => {
+    const checkpoint = store.upsertResearchCheckpoint({
+      sourceId: "qwen-code",
+      kind: "release",
+      policyHash: "policy-a",
+      channelState: "baselined",
+      cursor: "cursor-1",
+      lastSha: "a".repeat(40),
+      lastId: "release-1",
+      now: 100,
+    });
+    expect(checkpoint).toMatchObject({ cursor: "cursor-1", lastId: "release-1" });
+    expect(
+      store.upsertResearchCheckpoint({
+        sourceId: "qwen-code",
+        kind: "release",
+        policyHash: "policy-b",
+        channelState: "baselined",
+        cursor: "cursor-2",
+        lastSha: "b".repeat(40),
+        lastId: "release-2",
+        now: 101,
+      }),
+    ).toMatchObject({ createdAt: 100, updatedAt: 101, policyHash: "policy-b" });
+
+    const observation = store.upsertResearchObservation({
+      id: "observation-1",
+      sourceId: "qwen-code",
+      kind: "release",
+      externalId: "release-2",
+      sourceUrl: "https://github.com/QwenLM/qwen-code/releases/tag/v2",
+      sha: "b".repeat(40),
+      evidence: { title: "parallel agents" },
+      observedAt: 102,
+      now: 102,
+    });
+    expect(store.listResearchObservations({ sourceId: "qwen-code" })).toEqual([observation]);
+
+    store.upsertGapFinding({
+      fingerprint: "f".repeat(64),
+      sourceId: "qwen-code",
+      observationId: observation.id,
+      category: "extensions-parallelism",
+      topic: "parallel-agents",
+      subcode: "parallel.agents",
+      evidence: { local: ["src/agent.ts"] },
+      score: 90,
+      confidence: "confirmed",
+      status: "eligible",
+      policyHash: "policy-b",
+      expiresAt: 10_000,
+      now: 103,
+    });
+    expect(store.selectGapFindings({ policyHash: "policy-b", now: 104, limit: 1 })).toHaveLength(1);
+    expect(store.listGapFindings({ now: 10_000 })).toHaveLength(0);
+    expect(store.deleteResearchObservation(observation.id)).toBe(true);
+    expect(store.getGapFinding("f".repeat(64))).toBeUndefined();
+  });
+
+  it("migrates a version-three database without losing its existing data", () => {
+    const legacyPath = path.join(root, "legacy.sqlite");
+    const legacy = new DatabaseSync(legacyPath);
+    legacy.exec(`
+      CREATE TABLE legacy_data(id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO legacy_data(id, value) VALUES ('kept', 'baseline');
+      PRAGMA user_version = 3;
+    `);
+    legacy.close();
+
+    const migrated = new AutonomyStore(legacyPath);
+    migrated.upsertResearchCheckpoint({
+      sourceId: "claude-code",
+      kind: "repository",
+      policyHash: "policy",
+      channelState: "baselined",
+      lastSha: "c".repeat(40),
+      now: 200,
+    });
+    migrated.close();
+
+    const inspect = new DatabaseSync(legacyPath);
+    expect(
+      inspect.prepare("SELECT value FROM legacy_data WHERE id = 'kept'").get(),
+    ).toMatchObject({ value: "baseline" });
+    expect(
+      inspect.prepare("SELECT COUNT(*) AS count FROM research_checkpoints").get(),
+    ).toMatchObject({ count: 1 });
+    inspect.close();
+    expect(fs.existsSync(legacyPath)).toBe(true);
+  });
+
+  it("opens current state immutably and treats older state as empty inventory", () => {
+    store.close();
+    const currentBytes = fs.readFileSync(databasePath);
+    const currentMtime = fs.statSync(databasePath).mtimeMs;
+    const readOnly = new AutonomyStore(databasePath, { readOnly: true });
+    expect(readOnly.listIssues("repo-1")).toHaveLength(1);
+    expect(() => readOnly.appendEvent({
+      aggregateType: "test",
+      aggregateId: "readonly",
+      type: "forbidden",
+    })).toThrow();
+    readOnly.close();
+    expect(fs.readFileSync(databasePath)).toEqual(currentBytes);
+    expect(fs.statSync(databasePath).mtimeMs).toBe(currentMtime);
+
+    const oldPath = path.join(root, "old.sqlite");
+    const old = new DatabaseSync(oldPath);
+    old.exec("CREATE TABLE legacy(id INTEGER PRIMARY KEY); PRAGMA user_version = 3");
+    old.close();
+    const oldBytes = fs.readFileSync(oldPath);
+    const inventory = new AutonomyStore(oldPath, { readOnly: true });
+    expect(inventory.listIssues()).toEqual([]);
+    expect(inventory.listResearchCheckpoints()).toEqual([]);
+    inventory.close();
+    expect(fs.readFileSync(oldPath)).toEqual(oldBytes);
   });
 });

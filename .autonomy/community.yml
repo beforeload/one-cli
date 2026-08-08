@@ -1,10 +1,21 @@
-schema: autonomy.one-cli/v1
+schema: autonomy.one-cli/community-v2
 registeredSourcesOnly: true
+monitoring:
+  intervalMinutes: 120
+  maximumLatenessMinutes: 60
 allowedSourceTypes:
   - official-repository
   - official-documentation
   - official-releases
   - official-discussions
+
+capabilityTopics:
+  - project-monitoring
+  - interactive-coding-agent
+  - long-sessions-context
+  - extensions-parallelism
+  - provider-cost-governance
+  - safety-platform-testing-docs
 
 registryExpansion:
   mode: governance-proposal-only
@@ -16,6 +27,7 @@ findingRequirements:
   - originalCommunityNeed
   - productComparison
   - duplicateSearchEvidence
+  - approvedPaths
 
 promotion:
   author: beforeload
@@ -25,18 +37,147 @@ promotion:
   contentMaySupplyCommandsOrAuthority: false
 
 sources:
-  - id: openai-codex
-    name: OpenAI Codex
+  - id: qwen-code
+    name: Qwen Code
     trust: official-primary
-    repository: https://github.com/openai/codex
-    documentation: https://developers.openai.com/codex/cli
+    repository: https://github.com/QwenLM/qwen-code
+    releases: https://github.com/QwenLM/qwen-code/releases
+    discussions: https://github.com/QwenLM/qwen-code/discussions
+    documentation:
+      url: https://qwenlm.github.io/qwen-code-docs/en/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
   - id: claude-code
     name: Claude Code
     trust: official-primary
     repository: https://github.com/anthropics/claude-code
-    documentation: https://docs.anthropic.com/en/docs/claude-code/overview
+    releases: https://github.com/anthropics/claude-code/releases
+    discussions: https://github.com/anthropics/claude-code/discussions
+    documentation:
+      url: https://code.claude.com/docs/en/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: openai-codex
+    name: OpenAI Codex
+    trust: official-primary
+    repository: https://github.com/openai/codex
+    releases: https://github.com/openai/codex/releases
+    discussions: https://github.com/openai/codex/discussions
+    documentation:
+      url: https://developers.openai.com/codex/cli
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
   - id: gemini-cli
     name: Gemini CLI
     trust: official-primary
     repository: https://github.com/google-gemini/gemini-cli
-    documentation: https://geminicli.com/docs/
+    releases: https://github.com/google-gemini/gemini-cli/releases
+    discussions: https://github.com/google-gemini/gemini-cli/discussions
+    documentation:
+      url: https://geminicli.com/docs/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: opencode
+    name: OpenCode
+    trust: official-primary
+    repository: https://github.com/anomalyco/opencode
+    releases: https://github.com/anomalyco/opencode/releases
+    discussions: https://github.com/anomalyco/opencode/discussions
+    documentation:
+      url: https://opencode.ai/docs/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: aider
+    name: Aider
+    trust: official-primary
+    repository: https://github.com/Aider-AI/aider
+    releases: https://github.com/Aider-AI/aider/releases
+    discussions: https://github.com/Aider-AI/aider/discussions
+    documentation:
+      url: https://aider.chat/docs/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: goose
+    name: Goose
+    trust: official-primary
+    repository: https://github.com/aaif-goose/goose
+    releases: https://github.com/aaif-goose/goose/releases
+    discussions: https://github.com/aaif-goose/goose/discussions
+    documentation:
+      url: https://goose-docs.ai/
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: continue-cli
+    name: Continue CLI
+    trust: official-primary
+    repository: https://github.com/continuedev/continue
+    releases: https://github.com/continuedev/continue/releases
+    discussions: https://github.com/continuedev/continue/discussions
+    documentation:
+      url: https://docs.continue.dev/cli/quickstart
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs
+  - id: oh-my-cli
+    name: oh-my-cli
+    trust: official-primary
+    repository: https://github.com/qwen-code-dev-bot/oh-my-cli
+    releases: https://github.com/qwen-code-dev-bot/oh-my-cli/releases
+    discussions: https://github.com/qwen-code-dev-bot/oh-my-cli/discussions
+    documentation:
+      url: https://github.com/qwen-code-dev-bot/oh-my-cli/blob/main/docs/FIRST-RUN.md
+      kind: official-documentation
+    topics:
+      - project-monitoring
+      - interactive-coding-agent
+      - long-sessions-context
+      - extensions-parallelism
+      - provider-cost-governance
+      - safety-platform-testing-docs

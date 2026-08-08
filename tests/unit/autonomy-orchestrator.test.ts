@@ -15,7 +15,11 @@ import {
 } from "../../src/autonomy/orchestrator.js";
 import { AutonomyStore } from "../../src/autonomy/store.js";
 import type { ProcessResult } from "../../src/autonomy/process.js";
-import { EXECUTION_MARKER } from "../../src/autonomy/intake.js";
+import type { WorkerOptions } from "../../src/autonomy/worker.js";
+import {
+  EXECUTION_MARKER,
+  approvedPathBindingFields,
+} from "../../src/autonomy/intake.js";
 import { makeTempDir, removeTempDir } from "../helpers.js";
 
 describe("AutonomyOrchestrator", () => {
@@ -172,6 +176,28 @@ describe("AutonomyOrchestrator", () => {
         }),
       ).not.toThrow();
       expect(harness.sandboxRuns).toHaveLength(0);
+    } finally {
+      harness.store.close();
+    }
+  });
+
+  it("blocks worker changes outside a trusted community path binding before gates", async () => {
+    const approvedPaths = ["src/feature.ts", "tests/feature.test.ts"];
+    const harness = createHarness("auto-pr", roots, {
+      changedPath: "src/unrelated.ts",
+      approvedPaths,
+    });
+    try {
+      await harness.tick();
+      await harness.tick();
+      await expect(harness.tick()).resolves.toMatchObject({
+        action: "review",
+        state: "blocked",
+      });
+      expect(harness.workerCalls[0]).toMatchObject({ approvedPaths });
+      expect(harness.sandboxRuns).toHaveLength(0);
+      expect(harness.git.commitCount).toBe(0);
+      expect(harness.git.pushCount).toBe(0);
     } finally {
       harness.store.close();
     }
@@ -667,6 +693,7 @@ describe("AutonomyOrchestrator", () => {
 
 interface HarnessOptions {
   changedPath?: string;
+  approvedPaths?: readonly string[];
   losePullResponse?: boolean;
   loseMergeResponse?: boolean;
   staleCheck?: boolean;
@@ -708,10 +735,20 @@ function createHarness(
   let clock = 10_000;
   const realTime = options.coordinatorTtlMs !== undefined;
   const now = () => (realTime ? Date.now() : clock);
+  const pathBinding =
+    options.approvedPaths === undefined
+      ? undefined
+      : approvedPathBindingFields(options.approvedPaths);
   const body = `${options.omitExecutionMarker ? "" : `${EXECUTION_MARKER}\n`}${config.issuePolicy.normalization.requiredFields
     .map(
       (field) =>
-        `## ${field.replace(/[A-Z]/gu, (letter) => ` ${letter}`).replace(/^./u, (letter) => letter.toUpperCase())}\nvalue`,
+        `## ${field.replace(/[A-Z]/gu, (letter) => ` ${letter}`).replace(/^./u, (letter) => letter.toUpperCase())}\n${
+          field === "scope" && pathBinding
+            ? pathBinding.scope
+            : field === "acceptanceCriteria" && pathBinding
+              ? pathBinding.acceptanceCriteria
+              : "value"
+        }`,
     )
     .join("\n\n")}`;
   const issue: GitHubIssue = {
@@ -721,7 +758,10 @@ function createHarness(
     state: "open",
     htmlUrl: "https://example.test/issues/7",
     user: { login: "beforeload" },
-    labels: ["agent-ready", "source:self-discovery"],
+    labels: [
+      "agent-ready",
+      options.approvedPaths === undefined ? "source:self-discovery" : "source:community",
+    ],
   };
   const shared: {
     localHead: string;
@@ -1004,7 +1044,9 @@ function createHarness(
     },
   };
   let workerFailures = options.workerFailures ?? 0;
-  const worker = async () => {
+  const workerCalls: WorkerOptions[] = [];
+  const worker = async (input: WorkerOptions) => {
+    workerCalls.push(input);
     if (options.holdWorker) await options.holdWorker;
     if (workerFailures > 0) {
       workerFailures--;
@@ -1081,6 +1123,7 @@ function createHarness(
     sandboxRuns,
     releaseCalls,
     intakeFindings,
+    workerCalls,
     orchestrator,
     get claimDeleteCount() {
       return claimDeleteCount;
