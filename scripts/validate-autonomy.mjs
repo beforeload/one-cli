@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredFiles = [
@@ -12,6 +13,7 @@ const requiredFiles = [
   ".autonomy/issue-policy.yml",
   ".autonomy/quality-gates.yml",
   ".autonomy/community.yml",
+  ".autonomy/gap-policy.yml",
   ".autonomy/prompts/coordinator.md",
   ".github/CODEOWNERS",
   ".github/workflows/verify.yml",
@@ -55,10 +57,11 @@ for (const file of [
   ".autonomy/product.yml",
   ".autonomy/issue-policy.yml",
   ".autonomy/quality-gates.yml",
-  ".autonomy/community.yml",
 ]) {
   requireText(file, "schema: autonomy.one-cli/v1");
 }
+requireText(".autonomy/community.yml", "schema: autonomy.one-cli/community-v2");
+requireText(".autonomy/gap-policy.yml", "schema: autonomy.one-cli/gap-policy-v1");
 
 for (const [file, values] of Object.entries({
   ".autonomy/product.yml": [
@@ -97,6 +100,14 @@ for (const [file, values] of Object.entries({
     "detachedExactMergeWorktree: true",
     "runBeforeLeaseRelease: true",
   ],
+  ".autonomy/gap-policy.yml": [
+    "confidenceThreshold: likely",
+    "minimumScore: 70",
+    "maximumPromotionsPerTick: 1",
+    "findingTtlDays: 30",
+    "governance: forbidden",
+    "speculative: forbidden",
+  ],
   ".autonomy/prompts/coordinator.md": [
     "Execute exactly one bounded tick per invocation.",
     "## Reconcile first",
@@ -107,6 +118,73 @@ for (const [file, values] of Object.entries({
   ],
 })) {
   for (const value of values) requireText(file, value);
+}
+
+const community = YAML.parse(documents.get(".autonomy/community.yml") ?? "");
+if (
+  community?.monitoring?.intervalMinutes !== 120 ||
+  community?.monitoring?.maximumLatenessMinutes !== 60
+) {
+  failures.push(".autonomy/community.yml must enforce a two-hour scan and one-hour maximum lateness");
+}
+const expectedSources = [
+  "qwen-code",
+  "claude-code",
+  "openai-codex",
+  "gemini-cli",
+  "opencode",
+  "aider",
+  "goose",
+  "continue-cli",
+  "oh-my-cli",
+];
+const expectedCategories = [
+  "project-monitoring",
+  "interactive-coding-agent",
+  "long-sessions-context",
+  "extensions-parallelism",
+  "provider-cost-governance",
+  "safety-platform-testing-docs",
+];
+if (
+  !Array.isArray(community?.sources) ||
+  community.sources.length !== expectedSources.length ||
+  expectedSources.some((id, index) => community.sources[index]?.id !== id)
+) {
+  failures.push(".autonomy/community.yml must contain the closed ordered nine-source registry");
+}
+if (
+  !Array.isArray(community?.capabilityTopics) ||
+  community.capabilityTopics.join("\n") !== expectedCategories.join("\n")
+) {
+  failures.push(".autonomy/community.yml must contain the closed capability topic taxonomy");
+}
+for (const source of community?.sources ?? []) {
+  for (const key of ["repository", "releases", "discussions"]) {
+    if (typeof source[key] !== "string" || !source[key].startsWith("https://github.com/")) {
+      failures.push(`community source ${String(source.id)} has invalid official ${key} URL`);
+    }
+  }
+  if (
+    source.documentation?.kind !== "official-documentation" ||
+    typeof source.documentation?.url !== "string"
+  ) {
+    failures.push(`community source ${String(source.id)} lacks documentation metadata`);
+  }
+  if (
+    !Array.isArray(source.topics) ||
+    source.topics.some((topic) => !expectedCategories.includes(topic))
+  ) {
+    failures.push(`community source ${String(source.id)} has an unknown capability topic`);
+  }
+}
+
+const gapPolicy = YAML.parse(documents.get(".autonomy/gap-policy.yml") ?? "");
+if (
+  !Array.isArray(gapPolicy?.categories) ||
+  gapPolicy.categories.join("\n") !== expectedCategories.join("\n")
+) {
+  failures.push(".autonomy/gap-policy.yml must use the closed ordered category taxonomy");
 }
 
 const packageJson = JSON.parse(

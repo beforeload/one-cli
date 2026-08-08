@@ -12,15 +12,30 @@ import {
 } from "./config.js";
 import type { ApprovalBinding, Attempt, JsonValue, LeaseGrant } from "./domain.js";
 import { GitManager } from "./git.js";
-import { GhRestTransport, GitHubClient } from "./github.js";
+import {
+  GhRestTransport,
+  GitHubClient,
+  type GitHubTransport,
+} from "./github.js";
+import {
+  GhGraphqlTransport,
+  type GitHubGraphqlTransport,
+} from "./github-graphql.js";
+import { GitHubReadClient } from "./github-read.js";
 import { TrustedIntake } from "./intake.js";
 import {
+  communityMonitoringStatus,
   MaintenanceCoordinator,
   ProviderFindingNormalizer,
   ProviderIssueNormalizer,
 } from "./maintenance.js";
 import { AutonomyOrchestrator } from "./orchestrator.js";
-import { SpawnProcessRunner, assertProcessSucceeded } from "./process.js";
+import {
+  SpawnProcessRunner,
+  assertProcessSucceeded,
+  type ProcessRunner,
+} from "./process.js";
+import { GitHubResearchPort } from "./research.js";
 import {
   ReleaseManager,
   Supervisor,
@@ -86,7 +101,10 @@ async function runCommand(command: string, argv: readonly string[]): Promise<num
   const config = loadAutonomyConfig(options.workspace, {
     ...(options.mode === undefined ? {} : { mode: options.mode }),
   });
-  const store = new AutonomyStore(path.join(config.stateRoot, "state.sqlite"));
+  if (config.mode === "observe") assertObserveCommand(command, options);
+  const store = new AutonomyStore(path.join(config.stateRoot, "state.sqlite"), {
+    readOnly: config.mode === "observe",
+  });
   try {
     switch (command) {
       case "init":
@@ -102,14 +120,27 @@ async function runCommand(command: string, argv: readonly string[]): Promise<num
       case "status":
         output(options, {
           mode: config.mode,
+          monitoring: monitoringSnapshot(config, store),
           activeAttempt: store.getActiveAttempt() ?? null,
           issues: store.listIssues(config.repoKey),
           attempts: store.listAttempts(),
         });
         return 0;
-      case "events":
-        for (const event of store.listEvents({ limit: 1_000 })) output(options, event, true);
+      case "events": {
+        const events = store.listEvents({ limit: 1_000 });
+        const monitoring = monitoringSnapshot(config, store);
+        if (options.output === "json") {
+          output(options, { monitoring, events });
+        } else {
+          for (const event of events) output(options, event, options.output === "jsonl");
+          output(
+            options,
+            { type: "autonomy.monitoring-status", data: monitoring },
+            options.output === "jsonl",
+          );
+        }
         return 0;
+      }
       case "approvals":
         output(options, store.listApprovals());
         return 0;
@@ -143,6 +174,16 @@ async function runCommand(command: string, argv: readonly string[]): Promise<num
     }
   } finally {
     store.close();
+  }
+}
+
+function assertObserveCommand(command: string, options: CliOptions): void {
+  const readOnly =
+    ["init", "status", "events", "approvals", "once", "daemon", "schedule"].includes(command) ||
+    (command === "release" && options.positionals[0] === "status") ||
+    (["reconcile", "gc"].includes(command) && !options.apply);
+  if (!readOnly) {
+    throw new Error(`Autonomy ${command} is unavailable in observe mode`);
   }
 }
 
@@ -357,12 +398,14 @@ async function daemon(
       } catch (error) {
         if (controller.signal.aborted) break;
         const detail = errorMessage(error);
-        store.appendEvent({
-          aggregateType: "daemon",
-          aggregateId: config.repoKey,
-          type: "daemon.tick-failed",
-          data: { detail },
-        });
+        if (config.mode !== "observe") {
+          store.appendEvent({
+            aggregateType: "daemon",
+            aggregateId: config.repoKey,
+            type: "daemon.tick-failed",
+            data: { detail },
+          });
+        }
         output(options, { action: "tick-error", state: "waiting", detail }, options.output === "jsonl");
       }
       if (controller.signal.aborted) break;
@@ -540,10 +583,17 @@ async function scheduleCommand(
     ["agent-ready"],
   );
   const scheduler = new AutonomyScheduler(store, config);
-  const due = scheduler.ensureDueTimestamps(now);
+  const due = scheduler.due(now);
+  const promotableGap = store.selectGapFindings({
+    policyHash: config.policyHash,
+    now,
+    limit: 1,
+  });
   const next = scheduler.next({
     now,
+    initializeDue: false,
     hasPromotableUserIssue: promotable.length > 0,
+    hasPromotableGap: promotableGap.length > 0,
     hasReadyIssue: ready.length > 0,
   });
   output(options, {
@@ -555,6 +605,7 @@ async function scheduleCommand(
       "user-promotion",
       "post-merge-dogfood",
       "global-dogfood",
+      "gap-promotion",
       "ready-issue",
       "community-scan",
       "idle",
@@ -563,7 +614,9 @@ async function scheduleCommand(
     next: next ?? null,
     activeAttempt: store.getActiveAttempt() ?? null,
     promotableUserIssues: promotable.map((issue) => issue.number),
+    promotableGapFindings: promotableGap.map((finding) => finding.fingerprint),
     readyIssues: ready.map((issue) => issue.number),
+    monitoring: communityMonitoringStatus(config, store, due.communityScan, now),
   });
   return 0;
 }
@@ -614,7 +667,19 @@ async function intakeCommand(
 }
 
 function releaseManager(config: AutonomyConfig): ReleaseManager {
-  return new ReleaseManager({ releasesDir: path.join(config.stateRoot, "releases") });
+  return new ReleaseManager({
+    releasesDir: path.join(config.stateRoot, "releases"),
+    readOnly: config.mode === "observe",
+  });
+}
+
+function monitoringSnapshot(
+  config: AutonomyConfig,
+  store: AutonomyStore,
+  now = Date.now(),
+) {
+  const due = new AutonomyScheduler(store, config).due(now);
+  return communityMonitoringStatus(config, store, due.communityScan, now);
 }
 
 async function assertCleanExactHead(workspace: string, expectedSha: string): Promise<void> {
@@ -720,8 +785,8 @@ function runtime(config: AutonomyConfig, store: AutonomyStore): MaintenanceCoord
       : {
           issueNormalizer: new ProviderIssueNormalizer(parts.provider, parts.runConfig.model),
           findingNormalizer: new ProviderFindingNormalizer(parts.provider, parts.runConfig.model),
+          research: parts.research!,
         }),
-    // The CLI intentionally has no crawler. A due community scan remains pending.
   });
 }
 
@@ -739,6 +804,7 @@ function runtimeParts(config: AutonomyConfig, store: AutonomyStore): {
   git: GitManager;
   intake: TrustedIntake;
   orchestrator: AutonomyOrchestrator;
+  research?: GitHubResearchPort;
 } {
   const runConfig =
     config.mode === "observe"
@@ -763,8 +829,12 @@ function runtimeParts(config: AutonomyConfig, store: AutonomyStore): {
           apiKey: runConfig.apiKey,
           baseUrl: runConfig.baseUrl,
         });
-  const github = new GitHubClient(new GhRestTransport());
-  const git = new GitManager({ storageRoot: path.join(config.stateRoot, "git") });
+  const githubRuntime = createGitHubRuntimeAdapters(config, store);
+  const github = githubRuntime.github;
+  const git = new GitManager({
+    storageRoot: path.join(config.stateRoot, "git"),
+    readOnly: config.mode === "observe",
+  });
   const intake = new TrustedIntake({ config, store, github });
   const orchestrator = new AutonomyOrchestrator({
     config,
@@ -779,7 +849,40 @@ function runtimeParts(config: AutonomyConfig, store: AutonomyStore): {
     intake,
     release: releaseManager(config),
   });
-  return { runConfig, provider, github, git, intake, orchestrator };
+  return {
+    runConfig,
+    provider,
+    github,
+    git,
+    intake,
+    orchestrator,
+    ...(githubRuntime.research === undefined ? {} : { research: githubRuntime.research }),
+  };
+}
+
+export interface GitHubRuntimeAdapterOptions {
+  runner?: ProcessRunner;
+  rest?: GitHubTransport;
+  graphql?: GitHubGraphqlTransport;
+}
+
+export function createGitHubRuntimeAdapters(
+  config: AutonomyConfig,
+  store: AutonomyStore,
+  options: GitHubRuntimeAdapterOptions = {},
+): {
+  github: GitHubClient;
+  read?: GitHubReadClient;
+  research?: GitHubResearchPort;
+} {
+  const runner = options.runner ?? new SpawnProcessRunner();
+  const rest = options.rest ?? new GhRestTransport({ runner });
+  const github = new GitHubClient(rest);
+  if (config.mode === "observe") return { github };
+  const graphql = options.graphql ?? new GhGraphqlTransport({ runner });
+  const read = new GitHubReadClient(rest, graphql);
+  const research = new GitHubResearchPort({ store, github: read, config });
+  return { github, read, research };
 }
 
 function sandboxFor(config: AutonomyConfig, worktreePath: string): DarwinSandbox {

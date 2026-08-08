@@ -23,7 +23,12 @@ import {
   isExecutionEligible,
   normalizedIssueFields,
 } from "./github.js";
-import { isTrustedExecutionIssue, type TrustedIntake } from "./intake.js";
+import {
+  COMMUNITY_SOURCE_LABEL,
+  isTrustedExecutionIssue,
+  parseApprovedPathBinding,
+  type TrustedIntake,
+} from "./intake.js";
 import { LeaseCoordinator, LeaseConflictError, LeaseLostError } from "./lease.js";
 import type { ProcessResult } from "./process.js";
 import type {
@@ -658,6 +663,14 @@ export class AutonomyOrchestrator {
     );
     for (const issue of [...candidates].sort((a, b) => a.number - b.number)) {
       const branch = issueBranch(issue);
+      const issueFields = normalizedIssueFields(
+        issue,
+        this.dependencies.config.issuePolicy.normalization.requiredFields,
+      );
+      const communityBound = issue.labels.includes(COMMUNITY_SOURCE_LABEL);
+      const approvedPaths = communityBound && issueFields
+        ? parseApprovedPathBinding(issueFields)
+        : undefined;
       const [branchExists, pull] = await Promise.all([
         this.dependencies.git.remoteBranchExists(repository, "origin", branch, signal),
         this.dependencies.github.findPullRequestByHead(this.repositoryRef, branch, signal),
@@ -667,6 +680,8 @@ export class AutonomyOrchestrator {
           issue,
           this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
         ) ||
+        issueFields === undefined ||
+        (communityBound && approvedPaths === undefined) ||
         !isExecutionEligible({
           issue,
           exactAuthor: this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
@@ -736,10 +751,8 @@ export class AutonomyOrchestrator {
             digest,
             owner: issueOwner,
           },
-          issueFields: normalizedIssueFields(
-            issue,
-            this.dependencies.config.issuePolicy.normalization.requiredFields,
-          )!,
+          issueFields,
+          ...(approvedPaths === undefined ? {} : { approvedPaths: [...approvedPaths] }),
         },
       });
       return await this.acquireRemoteClaim(pending, signal, false);
@@ -1058,6 +1071,7 @@ export class AutonomyOrchestrator {
     const onAbort = () => controller.abort(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     let worker: WorkerResult;
+    const approvedPaths = optionalStringArray(detailObject(current).approvedPaths);
     try {
       worker = await (this.dependencies.worker ?? runAutonomyWorker)({
         worktreePath: worktree.path,
@@ -1065,7 +1079,9 @@ export class AutonomyOrchestrator {
           issueNumber: issueNumber(current),
           title: this.dependencies.store.getIssue(current.issueId)?.title ?? "",
           fields: detailObject(current).issueFields ?? {},
+          ...(approvedPaths === undefined ? {} : { approvedPaths }),
         },
+        ...(approvedPaths === undefined ? {} : { approvedPaths }),
         provider: this.dependencies.provider,
         runConfig: {
           ...this.dependencies.runConfig,
@@ -1112,7 +1128,16 @@ export class AutonomyOrchestrator {
     if (diff.nameStatus.length === 0) {
       return await this.handleFailure(attempt, "diff", 0, "worker produced no changes", signal);
     }
-    if (diff.nameStatus.length > this.maxChangedFiles()) {
+    const paths = [
+      ...new Set(
+        diff.nameStatus.flatMap((entry) =>
+          entry.originalPath === undefined
+            ? [entry.path]
+            : [entry.originalPath, entry.path],
+        ),
+      ),
+    ];
+    if (paths.length > this.maxChangedFiles()) {
       return await this.blockAttempt(
         attempt,
         "review",
@@ -1120,7 +1145,22 @@ export class AutonomyOrchestrator {
         signal,
       );
     }
-    const paths = diff.nameStatus.map((entry) => entry.path);
+    const approvedPaths = optionalStringArray(detailObject(attempt).approvedPaths);
+    if (
+      approvedPaths !== undefined &&
+      paths.some((changedPath) => !approvedPaths.includes(changedPath))
+    ) {
+      return await this.blockAttempt(
+        attempt,
+        "review",
+        {
+          reason: "changed path is outside the trusted approved-path binding",
+          approvedPaths,
+          changedPaths: paths,
+        },
+        signal,
+      );
+    }
     const diffHash = crypto.createHash("sha256").update(diff.patch).digest("hex");
     const deterministic = deterministicReview(diff.patch, paths, {
       protectedPaths: this.dependencies.config.qualityGates.governance.protectedPaths,
@@ -2448,6 +2488,8 @@ export class AutonomyOrchestrator {
       issue,
       this.dependencies.config.issuePolicy.normalization.requiredFields,
     );
+    const approvedPaths = fields ? parseApprovedPathBinding(fields) : undefined;
+    const storedApprovedPaths = optionalStringArray(detailObject(attempt).approvedPaths);
     const quarantine = new Set([
       "agent-failed",
       "quarantined",
@@ -2459,6 +2501,10 @@ export class AutonomyOrchestrator {
       !issue.labels.includes("agent-ready") ||
       issue.labels.some((label) => quarantine.has(label)) ||
       fields === undefined ||
+      (issue.labels.includes(COMMUNITY_SOURCE_LABEL) &&
+        (approvedPaths === undefined ||
+          storedApprovedPaths === undefined ||
+          !sameStrings(approvedPaths, storedApprovedPaths))) ||
       !isTrustedExecutionIssue(
         issue,
         this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
@@ -2580,6 +2626,18 @@ function stringArray(value: JsonValue | undefined): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function optionalStringArray(value: JsonValue | undefined): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return value.every((item) => typeof item === "string") ? [...value] : undefined;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((candidate, index) => candidate === right[index])
+  );
 }
 
 function stringFields(value: JsonValue | undefined): Readonly<Record<string, string>> {

@@ -26,7 +26,7 @@ export interface GitStatus {
 
 export interface GitDiff {
   readonly patch: string;
-  readonly nameStatus: readonly { status: string; path: string }[];
+  readonly nameStatus: readonly { status: string; path: string; originalPath?: string }[];
 }
 
 export interface CreateWorktreeOptions {
@@ -44,6 +44,7 @@ export interface PushOptions {
 
 export interface GitManagerOptions {
   storageRoot: string;
+  readOnly?: boolean;
   runner?: ProcessRunner;
   gitExecutable?: string;
   timeoutMs?: number;
@@ -91,12 +92,19 @@ export class GitManager {
       "Git output limit",
     );
 
-    fs.mkdirSync(options.storageRoot, { recursive: true, mode: 0o700 });
-    this.storageRoot = fs.realpathSync(options.storageRoot);
+    if (!options.readOnly) {
+      fs.mkdirSync(options.storageRoot, { recursive: true, mode: 0o700 });
+    }
+    this.storageRoot =
+      options.readOnly && !fs.existsSync(options.storageRoot)
+        ? path.resolve(options.storageRoot)
+        : fs.realpathSync(options.storageRoot);
     this.repositoriesRoot = path.join(this.storageRoot, "repositories");
     this.worktreesRoot = path.join(this.storageRoot, "worktrees");
-    fs.mkdirSync(this.repositoriesRoot, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(this.worktreesRoot, { recursive: true, mode: 0o700 });
+    if (!options.readOnly) {
+      fs.mkdirSync(this.repositoriesRoot, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(this.worktreesRoot, { recursive: true, mode: 0o700 });
+    }
   }
 
   async cloneBare(
@@ -349,13 +357,17 @@ export class GitManager {
     );
     assertProcessSucceeded("git diff --name-status", names);
     const fields = names.stdout.split("\0");
-    const nameStatus: Array<{ status: string; path: string }> = [];
+    const nameStatus: Array<{ status: string; path: string; originalPath?: string }> = [];
     for (let index = 0; index < fields.length - 1; ) {
       const status = fields[index++]!;
       const firstPath = fields[index++]!;
       if (/^[RC]/u.test(status)) {
         const secondPath = fields[index++]!;
-        nameStatus.push({ status, path: secondPath || firstPath });
+        nameStatus.push({
+          status,
+          path: secondPath || firstPath,
+          ...(secondPath && secondPath !== firstPath ? { originalPath: firstPath } : {}),
+        });
       } else {
         nameStatus.push({ status, path: firstPath });
       }

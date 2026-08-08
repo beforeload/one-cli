@@ -73,6 +73,7 @@ export interface ReleaseCandidateBinding {
 
 export interface ReleaseManagerOptions {
   releasesDir: string;
+  readOnly?: boolean;
   runner?: ProcessRunner;
   gitExecutable?: string;
   maxFiles?: number;
@@ -142,9 +143,14 @@ export class ReleaseManager {
       "Git output limit",
     );
 
-    fs.mkdirSync(options.releasesDir, { recursive: true, mode: 0o700 });
-    this.releasesDir = fs.realpathSync(options.releasesDir);
-    bestEffortChmod(this.releasesDir, 0o700);
+    if (!options.readOnly) {
+      fs.mkdirSync(options.releasesDir, { recursive: true, mode: 0o700 });
+    }
+    this.releasesDir =
+      options.readOnly && !fs.existsSync(options.releasesDir)
+        ? path.resolve(options.releasesDir)
+        : fs.realpathSync(options.releasesDir);
+    if (!options.readOnly) bestEffortChmod(this.releasesDir, 0o700);
   }
 
   async stage(options: StageReleaseOptions): Promise<StagedRelease> {

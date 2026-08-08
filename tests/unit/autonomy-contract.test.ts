@@ -36,6 +36,31 @@ describe("repository autonomy contract", () => {
     );
   });
 
+  it("closes community research and gap promotion contracts", () => {
+    const community = read(".autonomy/community.yml");
+    const gapPolicy = read(".autonomy/gap-policy.yml");
+    for (const id of [
+      "qwen-code",
+      "claude-code",
+      "openai-codex",
+      "gemini-cli",
+      "opencode",
+      "aider",
+      "goose",
+      "continue-cli",
+      "oh-my-cli",
+    ]) {
+      expect(community).toContain(`id: ${id}`);
+    }
+    expect(community.match(/^\s+- id:/gmu)).toHaveLength(9);
+    expect(community.match(/^\s+releases: https:\/\/github\.com\//gmu)).toHaveLength(9);
+    expect(community.match(/^\s+discussions: https:\/\/github\.com\//gmu)).toHaveLength(9);
+    expect(gapPolicy).toContain("confidenceThreshold: likely");
+    expect(gapPolicy).toContain("maximumPromotionsPerTick: 1");
+    expect(gapPolicy).toContain("governance: forbidden");
+    expect(gapPolicy).toContain("speculative: forbidden");
+  });
+
   it("requires reconcile-first bounded coordination and delivery gates", () => {
     const coordinator = read(".autonomy/prompts/coordinator.md");
     const reconcile = coordinator.indexOf("## Reconcile first");

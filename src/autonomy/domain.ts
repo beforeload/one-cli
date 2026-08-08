@@ -212,3 +212,74 @@ export interface Check {
   createdAt: number;
   updatedAt: number;
 }
+
+export type ResearchKind = "repository" | "release" | "discussion" | "documentation";
+
+export interface ResearchCheckpoint {
+  sourceId: string;
+  kind: ResearchKind;
+  policyHash: string;
+  channelState: "unavailable" | "baselined";
+  cursor: string | null;
+  page: number | null;
+  lastSha: string | null;
+  lastId: string | null;
+  lastAt: number | null;
+  boundarySha: string | null;
+  boundaryId: string | null;
+  boundaryAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResearchObservation {
+  id: string;
+  sourceId: string;
+  kind: ResearchKind;
+  externalId: string;
+  sourceUrl: string;
+  sha: string | null;
+  evidence: JsonValue;
+  observedAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type GapCategory =
+  | "project-monitoring"
+  | "interactive-coding-agent"
+  | "long-sessions-context"
+  | "extensions-parallelism"
+  | "provider-cost-governance"
+  | "safety-platform-testing-docs";
+export type GapConfidence = "speculative" | "likely" | "confirmed";
+export type GapFindingStatus =
+  | "queued"
+  | "eligible"
+  | "retryable"
+  | "in_doubt"
+  | "promoted"
+  | "duplicate"
+  | "blocked"
+  | "rejected"
+  | "expired";
+
+export interface GapFinding {
+  fingerprint: string;
+  sourceId: string;
+  observationId: string;
+  category: GapCategory;
+  topic: string;
+  subcode: string;
+  evidence: JsonValue;
+  score: number;
+  confidence: GapConfidence;
+  status: GapFindingStatus;
+  policyHash: string;
+  operationId: string | null;
+  retryCount: number;
+  retryAfter: number | null;
+  expiresAt: number;
+  createdAt: number;
+  updatedAt: number;
+}

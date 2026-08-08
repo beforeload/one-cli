@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import {
   canTransitionAttempt,
@@ -11,6 +12,10 @@ import {
   type Check,
   type CheckStatus,
   type EventInput,
+  type GapCategory,
+  type GapConfidence,
+  type GapFinding,
+  type GapFindingStatus,
   type Issue,
   type IssueClaimEvidence,
   type JsonValue,
@@ -19,10 +24,13 @@ import {
   type OperationReservation,
   type OutboxEntry,
   type Repo,
+  type ResearchCheckpoint,
+  type ResearchKind,
+  type ResearchObservation,
 } from "./domain.js";
 import { LeaseConflictError, LeaseLostError } from "./lease.js";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 8;
 
 const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
   [
@@ -158,6 +166,186 @@ const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
         CHECK(claim_status IS NULL OR claim_status IN ('active', 'released', 'in_doubt'));
     `,
   ],
+  [
+    4,
+    `
+      CREATE TABLE research_checkpoints (
+        source_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('repository', 'release', 'discussion', 'documentation')),
+        policy_hash TEXT NOT NULL,
+        cursor TEXT,
+        last_sha TEXT,
+        last_external_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(source_id, kind)
+      ) STRICT;
+
+      CREATE TABLE research_observations (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('repository', 'release', 'discussion', 'documentation')),
+        external_id TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        sha TEXT,
+        evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        observed_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(source_id, kind, external_id)
+      ) STRICT;
+
+      CREATE INDEX research_observations_scan_idx
+        ON research_observations(source_id, kind, observed_at, id);
+
+      CREATE TABLE gap_findings (
+        fingerprint TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        observation_id TEXT NOT NULL REFERENCES research_observations(id) ON DELETE CASCADE,
+        category TEXT NOT NULL CHECK(category IN (
+          'project-monitoring',
+          'interactive-coding-agent',
+          'long-sessions-context',
+          'extensions-parallelism',
+          'provider-cost-governance',
+          'safety-platform-testing-docs'
+        )),
+        topic TEXT NOT NULL,
+        subcode TEXT NOT NULL,
+        evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        score INTEGER NOT NULL CHECK(score >= 0 AND score <= 100),
+        confidence TEXT NOT NULL CHECK(confidence IN ('speculative', 'likely', 'confirmed')),
+        status TEXT NOT NULL CHECK(status IN ('queued', 'eligible', 'promoted', 'rejected', 'expired')),
+        policy_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(observation_id, subcode, policy_hash)
+      ) STRICT;
+
+      CREATE INDEX gap_findings_selection_idx
+        ON gap_findings(status, expires_at, score DESC, created_at, fingerprint);
+    `,
+  ],
+  [
+    5,
+    `
+      ALTER TABLE gap_findings RENAME TO gap_findings_v4;
+      DROP INDEX gap_findings_selection_idx;
+
+      CREATE TABLE gap_findings (
+        fingerprint TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        observation_id TEXT NOT NULL REFERENCES research_observations(id) ON DELETE CASCADE,
+        category TEXT NOT NULL CHECK(category IN (
+          'project-monitoring',
+          'interactive-coding-agent',
+          'long-sessions-context',
+          'extensions-parallelism',
+          'provider-cost-governance',
+          'safety-platform-testing-docs'
+        )),
+        topic TEXT NOT NULL,
+        subcode TEXT NOT NULL,
+        evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        score INTEGER NOT NULL CHECK(score >= 0 AND score <= 100),
+        confidence TEXT NOT NULL CHECK(confidence IN ('speculative', 'likely', 'confirmed')),
+        status TEXT NOT NULL CHECK(status IN (
+          'queued', 'eligible', 'promoted', 'duplicate', 'blocked', 'rejected', 'expired'
+        )),
+        policy_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(observation_id, subcode, policy_hash)
+      ) STRICT;
+
+      INSERT INTO gap_findings
+      SELECT * FROM gap_findings_v4;
+      DROP TABLE gap_findings_v4;
+
+      CREATE INDEX gap_findings_selection_idx
+        ON gap_findings(status, expires_at, score DESC, created_at, fingerprint);
+    `,
+  ],
+  [
+    6,
+    `
+      ALTER TABLE research_checkpoints ADD COLUMN page INTEGER
+        CHECK(page IS NULL OR page > 0);
+      ALTER TABLE research_checkpoints ADD COLUMN last_at INTEGER
+        CHECK(last_at IS NULL OR last_at >= 0);
+      ALTER TABLE research_checkpoints ADD COLUMN boundary_sha TEXT;
+      ALTER TABLE research_checkpoints ADD COLUMN boundary_external_id TEXT;
+      ALTER TABLE research_checkpoints ADD COLUMN boundary_at INTEGER
+        CHECK(boundary_at IS NULL OR boundary_at >= 0);
+    `,
+  ],
+  [
+    7,
+    `
+      ALTER TABLE gap_findings RENAME TO gap_findings_v6;
+      DROP INDEX gap_findings_selection_idx;
+
+      CREATE TABLE gap_findings (
+        fingerprint TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        observation_id TEXT NOT NULL REFERENCES research_observations(id) ON DELETE CASCADE,
+        category TEXT NOT NULL CHECK(category IN (
+          'project-monitoring',
+          'interactive-coding-agent',
+          'long-sessions-context',
+          'extensions-parallelism',
+          'provider-cost-governance',
+          'safety-platform-testing-docs'
+        )),
+        topic TEXT NOT NULL,
+        subcode TEXT NOT NULL,
+        evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        score INTEGER NOT NULL CHECK(score >= 0 AND score <= 100),
+        confidence TEXT NOT NULL CHECK(confidence IN ('speculative', 'likely', 'confirmed')),
+        status TEXT NOT NULL CHECK(status IN (
+          'queued', 'eligible', 'retryable', 'in_doubt', 'promoted', 'duplicate',
+          'blocked', 'rejected', 'expired'
+        )),
+        policy_hash TEXT NOT NULL,
+        operation_id TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+        retry_after INTEGER CHECK(retry_after IS NULL OR retry_after >= 0),
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(observation_id, subcode, policy_hash)
+      ) STRICT;
+
+      INSERT INTO gap_findings(
+        fingerprint, source_id, observation_id, category, topic, subcode,
+        evidence_json, score, confidence, status, policy_hash, operation_id,
+        retry_count, retry_after, expires_at, created_at, updated_at
+      )
+      SELECT fingerprint, source_id, observation_id, category, topic, subcode,
+        evidence_json, score, confidence, status, policy_hash, NULL,
+        0, NULL, expires_at, created_at, updated_at
+      FROM gap_findings_v6;
+      DROP TABLE gap_findings_v6;
+
+      CREATE INDEX gap_findings_selection_idx
+        ON gap_findings(status, retry_after, expires_at, score DESC, created_at, fingerprint);
+      CREATE INDEX gap_findings_operation_idx
+        ON gap_findings(operation_id);
+    `,
+  ],
+  [
+    8,
+    `
+      ALTER TABLE research_checkpoints ADD COLUMN channel_state TEXT NOT NULL
+        DEFAULT 'unavailable'
+        CHECK(channel_state IN ('unavailable', 'baselined'));
+      UPDATE research_checkpoints
+      SET channel_state = 'baselined'
+      WHERE kind = 'repository' OR last_external_id IS NOT NULL OR last_sha IS NOT NULL;
+    `,
+  ],
 ];
 
 interface RepoRow {
@@ -260,11 +448,85 @@ interface CheckRow {
   updated_at: number;
 }
 
+interface ResearchCheckpointRow {
+  source_id: string;
+  kind: ResearchKind;
+  policy_hash: string;
+  channel_state: ResearchCheckpoint["channelState"];
+  cursor: string | null;
+  page: number | null;
+  last_sha: string | null;
+  last_external_id: string | null;
+  last_at: number | null;
+  boundary_sha: string | null;
+  boundary_external_id: string | null;
+  boundary_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface ResearchObservationRow {
+  id: string;
+  source_id: string;
+  kind: ResearchKind;
+  external_id: string;
+  source_url: string;
+  sha: string | null;
+  evidence_json: string;
+  observed_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface GapFindingRow {
+  fingerprint: string;
+  source_id: string;
+  observation_id: string;
+  category: GapCategory;
+  topic: string;
+  subcode: string;
+  evidence_json: string;
+  score: number;
+  confidence: GapConfidence;
+  status: GapFindingStatus;
+  policy_hash: string;
+  operation_id: string | null;
+  retry_count: number;
+  retry_after: number | null;
+  expires_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export class AutonomyStore {
   private readonly database: DatabaseSync;
   private closed = false;
 
-  constructor(readonly filePath: string) {
+  constructor(
+    readonly filePath: string,
+    options: { readOnly?: boolean } = {},
+  ) {
+    if (options.readOnly === true) {
+      let database: DatabaseSync | undefined;
+      if (filePath !== ":memory:" && fs.existsSync(filePath)) {
+        const location = pathToFileURL(path.resolve(filePath));
+        location.searchParams.set("immutable", "1");
+        database = new DatabaseSync(location.href, { readOnly: true });
+        const version = Number(
+          (database.prepare("PRAGMA user_version").get() as unknown as { user_version: number })
+            .user_version,
+        );
+        if (version !== SCHEMA_VERSION) {
+          database.close();
+          database = undefined;
+        }
+      }
+      this.database = database ?? new DatabaseSync(":memory:");
+      if (database === undefined) this.migrate();
+      this.database.exec("PRAGMA query_only = ON");
+      this.database.exec("PRAGMA busy_timeout = 5000");
+      return;
+    }
     if (filePath !== ":memory:") {
       fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true, mode: 0o700 });
     }
@@ -1066,6 +1328,519 @@ export class AutonomyStore {
     return rows.map(operationFromRow);
   }
 
+  upsertResearchCheckpoint(input: {
+    sourceId: string;
+    kind: ResearchKind;
+    policyHash: string;
+    channelState: ResearchCheckpoint["channelState"];
+    cursor?: string | null;
+    page?: number | null;
+    lastSha?: string | null;
+    lastId?: string | null;
+    lastAt?: number | null;
+    boundarySha?: string | null;
+    boundaryId?: string | null;
+    boundaryAt?: number | null;
+    now?: number;
+  }): ResearchCheckpoint {
+    const now = timestamp(input.now);
+    requireText(input.sourceId, "research source id");
+    requireResearchKind(input.kind);
+    requireText(input.policyHash, "research policy hash");
+    if (!["unavailable", "baselined"].includes(input.channelState)) {
+      throw new Error("Research channel state is invalid");
+    }
+    for (const [value, label] of [
+      [input.cursor, "research cursor"],
+      [input.lastSha, "research last SHA"],
+      [input.lastId, "research last id"],
+      [input.boundarySha, "research boundary SHA"],
+      [input.boundaryId, "research boundary id"],
+    ] as const) {
+      if (value !== undefined && value !== null) requireText(value, label);
+    }
+    if (
+      input.page !== undefined &&
+      input.page !== null &&
+      (!Number.isSafeInteger(input.page) || input.page < 1)
+    ) {
+      throw new Error("Research page must be a positive integer");
+    }
+    if (
+      [input.lastAt, input.boundaryAt].some(
+        (value) =>
+          value !== undefined &&
+          value !== null &&
+          (!Number.isSafeInteger(value) || value < 0),
+      )
+    ) {
+      throw new Error("Research timestamps must be non-negative");
+    }
+    this.database
+      .prepare(
+        `INSERT INTO research_checkpoints(
+           source_id, kind, policy_hash, channel_state, cursor, page, last_sha, last_external_id, last_at,
+           boundary_sha, boundary_external_id, boundary_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_id, kind) DO UPDATE SET
+           policy_hash = excluded.policy_hash,
+           channel_state = excluded.channel_state,
+           cursor = excluded.cursor,
+           page = excluded.page,
+           last_sha = excluded.last_sha,
+           last_external_id = excluded.last_external_id,
+           last_at = excluded.last_at,
+           boundary_sha = excluded.boundary_sha,
+           boundary_external_id = excluded.boundary_external_id,
+           boundary_at = excluded.boundary_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.sourceId,
+        input.kind,
+        input.policyHash,
+        input.channelState,
+        input.cursor ?? null,
+        input.page ?? null,
+        input.lastSha ?? null,
+        input.lastId ?? null,
+        input.lastAt ?? null,
+        input.boundarySha ?? null,
+        input.boundaryId ?? null,
+        input.boundaryAt ?? null,
+        now,
+        now,
+      );
+    return this.getResearchCheckpoint(input.sourceId, input.kind)!;
+  }
+
+  upsertResearchCheckpoints(
+    inputs: readonly {
+      sourceId: string;
+      kind: ResearchKind;
+      policyHash: string;
+      channelState: ResearchCheckpoint["channelState"];
+      cursor?: string | null;
+      page?: number | null;
+      lastSha?: string | null;
+      lastId?: string | null;
+      lastAt?: number | null;
+      boundarySha?: string | null;
+      boundaryId?: string | null;
+      boundaryAt?: number | null;
+      now?: number;
+    }[],
+  ): ResearchCheckpoint[] {
+    if (inputs.length === 0) throw new Error("Research checkpoint batch must not be empty");
+    const identities = new Set<string>();
+    for (const input of inputs) {
+      const identity = `${input.sourceId}\0${input.kind}`;
+      if (identities.has(identity)) throw new Error("Research checkpoint batch contains duplicates");
+      identities.add(identity);
+    }
+    return this.transaction(() => inputs.map((input) => this.upsertResearchCheckpoint(input)));
+  }
+
+  getResearchCheckpoint(sourceId: string, kind: ResearchKind): ResearchCheckpoint | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT source_id, kind, policy_hash, channel_state, cursor, page, last_sha, last_external_id, last_at,
+                boundary_sha, boundary_external_id, boundary_at, created_at, updated_at
+         FROM research_checkpoints WHERE source_id = ? AND kind = ?`,
+      )
+      .get(sourceId, kind) as unknown as ResearchCheckpointRow | undefined;
+    return row ? researchCheckpointFromRow(row) : undefined;
+  }
+
+  listResearchCheckpoints(sourceId?: string): ResearchCheckpoint[] {
+    this.assertOpen();
+    const select =
+      `SELECT source_id, kind, policy_hash, channel_state, cursor, page, last_sha, last_external_id, last_at,
+              boundary_sha, boundary_external_id, boundary_at, created_at, updated_at
+       FROM research_checkpoints`;
+    const rows = (sourceId === undefined
+      ? this.database.prepare(`${select} ORDER BY source_id, kind`).all()
+      : this.database
+          .prepare(`${select} WHERE source_id = ? ORDER BY kind`)
+          .all(sourceId)) as unknown as ResearchCheckpointRow[];
+    return rows.map(researchCheckpointFromRow);
+  }
+
+  deleteResearchCheckpoint(sourceId: string, kind: ResearchKind): boolean {
+    this.assertOpen();
+    return (
+      Number(
+        this.database
+          .prepare("DELETE FROM research_checkpoints WHERE source_id = ? AND kind = ?")
+          .run(sourceId, kind).changes,
+      ) === 1
+    );
+  }
+
+  upsertResearchObservation(input: {
+    id: string;
+    sourceId: string;
+    kind: ResearchKind;
+    externalId: string;
+    sourceUrl: string;
+    sha?: string | null;
+    evidence: JsonValue;
+    observedAt: number;
+    now?: number;
+  }): ResearchObservation {
+    const now = timestamp(input.now);
+    const observedAt = timestamp(input.observedAt);
+    requireText(input.id, "research observation id");
+    requireText(input.sourceId, "research source id");
+    requireResearchKind(input.kind);
+    requireText(input.externalId, "research external id");
+    requireText(input.sourceUrl, "research source URL");
+    if (input.sha !== undefined && input.sha !== null) requireText(input.sha, "research SHA");
+    this.database
+      .prepare(
+        `INSERT INTO research_observations(
+           id, source_id, kind, external_id, source_url, sha, evidence_json,
+           observed_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_id, kind, external_id) DO UPDATE SET
+           source_url = excluded.source_url,
+           sha = excluded.sha,
+           evidence_json = excluded.evidence_json,
+           observed_at = excluded.observed_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.id,
+        input.sourceId,
+        input.kind,
+        input.externalId,
+        input.sourceUrl,
+        input.sha ?? null,
+        serializeJson(input.evidence),
+        observedAt,
+        now,
+        now,
+      );
+    return this.getResearchObservation(input.sourceId, input.kind, input.externalId)!;
+  }
+
+  getResearchObservation(
+    sourceId: string,
+    kind: ResearchKind,
+    externalId: string,
+  ): ResearchObservation | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT id, source_id, kind, external_id, source_url, sha, evidence_json,
+                observed_at, created_at, updated_at
+         FROM research_observations
+         WHERE source_id = ? AND kind = ? AND external_id = ?`,
+      )
+      .get(sourceId, kind, externalId) as unknown as ResearchObservationRow | undefined;
+    return row ? researchObservationFromRow(row) : undefined;
+  }
+
+  getResearchObservationById(id: string): ResearchObservation | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT id, source_id, kind, external_id, source_url, sha, evidence_json,
+                observed_at, created_at, updated_at
+         FROM research_observations WHERE id = ?`,
+      )
+      .get(id) as unknown as ResearchObservationRow | undefined;
+    return row ? researchObservationFromRow(row) : undefined;
+  }
+
+  listResearchObservations(options: {
+    sourceId?: string;
+    kind?: ResearchKind;
+    afterObservedAt?: number;
+    limit?: number;
+  } = {}): ResearchObservation[] {
+    this.assertOpen();
+    const clauses: string[] = [];
+    const parameters: Array<string | number> = [];
+    if (options.sourceId !== undefined) {
+      clauses.push("source_id = ?");
+      parameters.push(options.sourceId);
+    }
+    if (options.kind !== undefined) {
+      requireResearchKind(options.kind);
+      clauses.push("kind = ?");
+      parameters.push(options.kind);
+    }
+    if (options.afterObservedAt !== undefined) {
+      clauses.push("observed_at > ?");
+      parameters.push(timestamp(options.afterObservedAt));
+    }
+    const limit = positiveLimit(options.limit, "Research observation");
+    parameters.push(limit);
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(
+        `SELECT id, source_id, kind, external_id, source_url, sha, evidence_json,
+                observed_at, created_at, updated_at
+         FROM research_observations${where}
+         ORDER BY observed_at, id LIMIT ?`,
+      )
+      .all(...parameters) as unknown as ResearchObservationRow[];
+    return rows.map(researchObservationFromRow);
+  }
+
+  deleteResearchObservation(id: string): boolean {
+    this.assertOpen();
+    return Number(this.database.prepare("DELETE FROM research_observations WHERE id = ?").run(id).changes) === 1;
+  }
+
+  upsertGapFinding(input: {
+    fingerprint: string;
+    sourceId: string;
+    observationId: string;
+    category: GapCategory;
+    topic: string;
+    subcode: string;
+    evidence: JsonValue;
+    score: number;
+    confidence: GapConfidence;
+    status: GapFindingStatus;
+    policyHash: string;
+    operationId?: string | null;
+    retryCount?: number;
+    retryAfter?: number | null;
+    expiresAt: number;
+    now?: number;
+  }): GapFinding {
+    const now = timestamp(input.now);
+    const expiresAt = timestamp(input.expiresAt);
+    requireText(input.fingerprint, "gap fingerprint");
+    requireText(input.sourceId, "gap source id");
+    requireText(input.observationId, "gap observation id");
+    requireText(input.topic, "gap topic");
+    requireText(input.subcode, "gap subcode");
+    requireText(input.policyHash, "gap policy hash");
+    requireGapCategory(input.category);
+    requireGapConfidence(input.confidence);
+    requireGapStatus(input.status);
+    if (input.operationId !== undefined && input.operationId !== null) {
+      requireText(input.operationId, "gap operation id");
+    }
+    const retryCount = input.retryCount ?? 0;
+    if (!Number.isSafeInteger(retryCount) || retryCount < 0) {
+      throw new Error("Gap retry count must be a non-negative integer");
+    }
+    if (
+      input.retryAfter !== undefined &&
+      input.retryAfter !== null &&
+      (!Number.isSafeInteger(input.retryAfter) || input.retryAfter < 0)
+    ) {
+      throw new Error("Gap retry timestamp must be non-negative");
+    }
+    if (!Number.isSafeInteger(input.score) || input.score < 0 || input.score > 100) {
+      throw new Error("Gap score must be an integer from 0 through 100");
+    }
+    this.database
+      .prepare(
+        `INSERT INTO gap_findings(
+           fingerprint, source_id, observation_id, category, topic, subcode,
+           evidence_json, score, confidence, status, policy_hash, operation_id,
+           retry_count, retry_after, expires_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(fingerprint) DO UPDATE SET
+           evidence_json = excluded.evidence_json,
+           score = excluded.score,
+           confidence = excluded.confidence,
+           status = excluded.status,
+           policy_hash = excluded.policy_hash,
+           operation_id = excluded.operation_id,
+           retry_count = excluded.retry_count,
+           retry_after = excluded.retry_after,
+           expires_at = excluded.expires_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.fingerprint,
+        input.sourceId,
+        input.observationId,
+        input.category,
+        input.topic,
+        input.subcode,
+        serializeJson(input.evidence),
+        input.score,
+        input.confidence,
+        input.status,
+        input.policyHash,
+        input.operationId ?? null,
+        retryCount,
+        input.retryAfter ?? null,
+        expiresAt,
+        now,
+        now,
+      );
+    return this.getGapFinding(input.fingerprint)!;
+  }
+
+  getGapFinding(fingerprint: string): GapFinding | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT fingerprint, source_id, observation_id, category, topic, subcode,
+                evidence_json, score, confidence, status, policy_hash, operation_id,
+                retry_count, retry_after, expires_at, created_at, updated_at
+         FROM gap_findings WHERE fingerprint = ?`,
+      )
+      .get(fingerprint) as unknown as GapFindingRow | undefined;
+    return row ? gapFindingFromRow(row) : undefined;
+  }
+
+  listGapFindings(options: {
+    sourceId?: string;
+    status?: GapFindingStatus;
+    policyHash?: string;
+    includeExpired?: boolean;
+    now?: number;
+    limit?: number;
+  } = {}): GapFinding[] {
+    this.assertOpen();
+    const clauses: string[] = [];
+    const parameters: Array<string | number> = [];
+    if (options.sourceId !== undefined) {
+      clauses.push("source_id = ?");
+      parameters.push(options.sourceId);
+    }
+    if (options.status !== undefined) {
+      requireGapStatus(options.status);
+      clauses.push("status = ?");
+      parameters.push(options.status);
+    }
+    if (options.policyHash !== undefined) {
+      clauses.push("policy_hash = ?");
+      parameters.push(options.policyHash);
+    }
+    if (options.includeExpired !== true) {
+      clauses.push("expires_at > ?");
+      parameters.push(timestamp(options.now));
+    }
+    parameters.push(positiveLimit(options.limit, "Gap finding"));
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(
+        `SELECT fingerprint, source_id, observation_id, category, topic, subcode,
+                evidence_json, score, confidence, status, policy_hash, operation_id,
+                retry_count, retry_after, expires_at, created_at, updated_at
+         FROM gap_findings${where}
+         ORDER BY score DESC, created_at, fingerprint LIMIT ?`,
+      )
+      .all(...parameters) as unknown as GapFindingRow[];
+    return rows.map(gapFindingFromRow);
+  }
+
+  selectGapFindings(options: {
+    policyHash: string;
+    now?: number;
+    limit?: number;
+  }): GapFinding[] {
+    const now = timestamp(options.now);
+    const limit = Math.min(positiveLimit(options.limit, "Gap selection"), 1);
+    const rows = this.database
+      .prepare(
+        `SELECT fingerprint, source_id, observation_id, category, topic, subcode,
+                evidence_json, score, confidence, status, policy_hash, operation_id,
+                retry_count, retry_after, expires_at, created_at, updated_at
+         FROM gap_findings
+         WHERE policy_hash = ?
+           AND (
+             status = 'eligible' OR
+             (status = 'retryable' AND (retry_after IS NULL OR retry_after <= ?))
+           )
+           AND expires_at > ?
+         ORDER BY score DESC, created_at, fingerprint LIMIT ?`,
+      )
+      .all(options.policyHash, now, now, limit) as unknown as GapFindingRow[];
+    return rows.map(gapFindingFromRow);
+  }
+
+  updateGapFinding(input: {
+    fingerprint: string;
+    status: GapFindingStatus;
+    evidence?: JsonValue;
+    operationId?: string | null;
+    retryCount?: number;
+    retryAfter?: number | null;
+    now?: number;
+  }): GapFinding {
+    const now = timestamp(input.now);
+    requireGapStatus(input.status);
+    const current = this.getGapFinding(input.fingerprint);
+    if (!current) throw new Error(`Unknown gap finding "${input.fingerprint}"`);
+    const retryCount = input.retryCount ?? current.retryCount;
+    if (!Number.isSafeInteger(retryCount) || retryCount < 0) {
+      throw new Error("Gap retry count must be a non-negative integer");
+    }
+    const retryAfter = input.retryAfter === undefined ? current.retryAfter : input.retryAfter;
+    if (retryAfter !== null && (!Number.isSafeInteger(retryAfter) || retryAfter < 0)) {
+      throw new Error("Gap retry timestamp must be non-negative");
+    }
+    const operationId =
+      input.operationId === undefined ? current.operationId : input.operationId;
+    if (operationId !== null) requireText(operationId, "gap operation id");
+    const result = this.database
+      .prepare(
+        `UPDATE gap_findings
+         SET status = ?, evidence_json = ?, operation_id = ?, retry_count = ?,
+             retry_after = ?, updated_at = ?
+         WHERE fingerprint = ?`,
+      )
+      .run(
+        input.status,
+        serializeJson(input.evidence ?? current.evidence),
+        operationId,
+        retryCount,
+        retryAfter,
+        now,
+        input.fingerprint,
+      );
+    if (Number(result.changes) !== 1) {
+      throw new Error(`Gap finding "${input.fingerprint}" changed concurrently`);
+    }
+    return this.getGapFinding(input.fingerprint)!;
+  }
+
+  expireGapFindings(policyHash: string, now?: number): number {
+    const at = timestamp(now);
+    requireText(policyHash, "gap policy hash");
+    const result = this.database
+      .prepare(
+        `UPDATE gap_findings
+         SET status = 'expired', updated_at = ?
+         WHERE policy_hash = ?
+           AND status IN ('queued', 'eligible', 'retryable')
+           AND expires_at <= ?`,
+      )
+      .run(at, policyHash, at);
+    return Number(result.changes);
+  }
+
+  deleteGapFinding(fingerprint: string): boolean {
+    this.assertOpen();
+    return Number(this.database.prepare("DELETE FROM gap_findings WHERE fingerprint = ?").run(fingerprint).changes) === 1;
+  }
+
+  getGapFindingByOperationId(operationId: string): GapFinding | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT fingerprint, source_id, observation_id, category, topic, subcode,
+                evidence_json, score, confidence, status, policy_hash, operation_id,
+                retry_count, retry_after, expires_at, created_at, updated_at
+         FROM gap_findings WHERE operation_id = ? LIMIT 1`,
+      )
+      .get(operationId) as unknown as GapFindingRow | undefined;
+    return row ? gapFindingFromRow(row) : undefined;
+  }
+
   private migrate(): void {
     const current = Number(
       (
@@ -1321,6 +2096,62 @@ function checkFromRow(row: CheckRow): Check {
   };
 }
 
+function researchCheckpointFromRow(row: ResearchCheckpointRow): ResearchCheckpoint {
+  return {
+    sourceId: row.source_id,
+    kind: row.kind,
+    policyHash: row.policy_hash,
+    channelState: row.channel_state,
+    cursor: row.cursor,
+    page: row.page,
+    lastSha: row.last_sha,
+    lastId: row.last_external_id,
+    lastAt: row.last_at,
+    boundarySha: row.boundary_sha,
+    boundaryId: row.boundary_external_id,
+    boundaryAt: row.boundary_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function researchObservationFromRow(row: ResearchObservationRow): ResearchObservation {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    kind: row.kind,
+    externalId: row.external_id,
+    sourceUrl: row.source_url,
+    sha: row.sha,
+    evidence: parseJson(row.evidence_json),
+    observedAt: row.observed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function gapFindingFromRow(row: GapFindingRow): GapFinding {
+  return {
+    fingerprint: row.fingerprint,
+    sourceId: row.source_id,
+    observationId: row.observation_id,
+    category: row.category,
+    topic: row.topic,
+    subcode: row.subcode,
+    evidence: parseJson(row.evidence_json),
+    score: row.score,
+    confidence: row.confidence,
+    status: row.status,
+    policyHash: row.policy_hash,
+    operationId: row.operation_id,
+    retryCount: row.retry_count,
+    retryAfter: row.retry_after,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function serializeJson(value: JsonValue): string {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error("Value is not JSON serializable");
@@ -1356,6 +2187,59 @@ function requireFence(fence: number): void {
 
 function requireText(value: string, label: string): void {
   if (!value.trim()) throw new Error(`${label} must not be empty`);
+}
+
+function positiveLimit(value: number | undefined, label: string): number {
+  const limit = value ?? 1_000;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+    throw new Error(`${label} limit must be an integer from 1 through 10000`);
+  }
+  return limit;
+}
+
+function requireResearchKind(value: ResearchKind): void {
+  if (!["repository", "release", "discussion", "documentation"].includes(value)) {
+    throw new Error("Research kind is invalid");
+  }
+}
+
+function requireGapCategory(value: GapCategory): void {
+  if (
+    ![
+      "project-monitoring",
+      "interactive-coding-agent",
+      "long-sessions-context",
+      "extensions-parallelism",
+      "provider-cost-governance",
+      "safety-platform-testing-docs",
+    ].includes(value)
+  ) {
+    throw new Error("Gap category is invalid");
+  }
+}
+
+function requireGapConfidence(value: GapConfidence): void {
+  if (!["speculative", "likely", "confirmed"].includes(value)) {
+    throw new Error("Gap confidence is invalid");
+  }
+}
+
+function requireGapStatus(value: GapFindingStatus): void {
+  if (
+    ![
+      "queued",
+      "eligible",
+      "retryable",
+      "in_doubt",
+      "promoted",
+      "duplicate",
+      "blocked",
+      "rejected",
+      "expired",
+    ].includes(value)
+  ) {
+    throw new Error("Gap finding status is invalid");
+  }
 }
 
 function validateIssueClaim(claim: IssueClaimEvidence): void {
