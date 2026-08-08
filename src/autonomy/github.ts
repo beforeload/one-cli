@@ -225,10 +225,15 @@ export interface GitHubPort {
 
 export type GitHubHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+export enum GitHubRestProjection {
+  ReleaseListMetadata = "release-list-metadata",
+}
+
 export interface GitHubTransportRequest {
   method: GitHubHttpMethod;
   path: string;
   body?: Readonly<Record<string, unknown>>;
+  projection?: GitHubRestProjection;
   signal?: AbortSignal;
 }
 
@@ -242,6 +247,9 @@ export interface GhRestTransportOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
 }
+
+const RELEASE_LIST_METADATA_JQ =
+  "map({id,node_id,tag_name,name,body,html_url,published_at,created_at})";
 
 /**
  * REST transport backed by the authenticated `gh` configuration. Authentication
@@ -276,6 +284,7 @@ export class GhRestTransport implements GitHubTransport {
       "Accept: application/vnd.github+json",
       "--header",
       "X-GitHub-Api-Version: 2022-11-28",
+      ...projectionArgs(request.projection),
       ...(request.body === undefined ? [] : ["--input", "-"]),
     ];
     const processRequest: ProcessRequest = {
@@ -304,6 +313,17 @@ export class GhRestTransport implements GitHubTransport {
     } catch {
       throw new Error("gh api returned invalid JSON");
     }
+  }
+}
+
+function projectionArgs(projection: GitHubRestProjection | undefined): string[] {
+  switch (projection) {
+    case undefined:
+      return [];
+    case GitHubRestProjection.ReleaseListMetadata:
+      return ["--jq", RELEASE_LIST_METADATA_JQ];
+    default:
+      throw new Error("Unsupported GitHub REST projection");
   }
 }
 
