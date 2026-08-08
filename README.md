@@ -2,11 +2,6 @@
 
 一个从 0→1 实现的小型、可审计 Coding Agent CLI。重点不是工具数量，而是稳定的运行时边界：tool-call 配对、安全审批、workspace 约束、append-only session、可恢复取消和纯 JSONL 输出。
 
-## 深度研究报告
-
-- [从 oh-my-cli 到 one-cli：Coding Agent 深度研究与 0→1 实践（PDF）](docs/one-cli-deep-research-report.pdf)
-- [可再生成的 HTML 源文件](docs/one-cli-deep-research-report.html)
-
 ## 安装与验证
 
 要求 Node.js `>=22.13.0`（`node:sqlite` 无需实验性 flag）和 npm。
