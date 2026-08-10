@@ -53,6 +53,7 @@ governance:
     - .npmrc
     - package.json
     - package-lock.json
+    - scripts/bootstrap-verifier-runner.sh
     - scripts/independent-verifier.mjs
     - scripts/validate-autonomy.mjs
     - scripts/validate-harness.mjs

@@ -332,14 +332,34 @@ async function waitForPinnedChecks(
 }
 
 async function semanticReviews(policy, binding, changedPaths, diff, reviewModule, environment) {
-  const token = requiredEnvironment(environment, policy.semanticReview.tokenEnvironment);
-  const baseUrl = httpsOrigin(policy.semanticReview.baseUrl);
+  const baseUrl = localProxyBaseUrl(optionalEnvironment(
+    environment,
+    policy.semanticReview.repositoryBaseUrlEnvironment,
+    optionalEnvironment(
+      environment,
+      policy.semanticReview.baseUrlEnvironment,
+      policy.semanticReview.defaultBaseUrl,
+    ),
+  ));
+  if (
+    optionalEnvironment(
+      environment,
+      "ONE_CLI_VERIFIER_API_KEY",
+      policy.semanticReview.apiKey,
+    ) !== policy.semanticReview.apiKey
+  ) {
+    throw new Error("Semantic verifier API key must remain the local-proxy placeholder");
+  }
   const configured = policy.semanticReview.profiles.map((profile) => ({
     profile,
-    model: optionalEnvironment(environment, profile.modelEnvironment, profile.defaultModel),
+    model: optionalEnvironment(
+      environment,
+      profile.repositoryModelEnvironment,
+      optionalEnvironment(environment, profile.modelEnvironment, profile.defaultModel),
+    ),
   }));
   if (configured[0].model === configured[1].model) {
-    throw new Error("Semantic verifier profiles must use two distinct GitHub Models IDs");
+    throw new Error("Semantic verifier profiles must use two distinct local proxy model IDs");
   }
   const prompt = reviewModule.semanticVetoPrompt({
     repository: binding.repository,
@@ -358,7 +378,7 @@ async function semanticReviews(policy, binding, changedPaths, diff, reviewModule
         redirect: "error",
         signal: controller.signal,
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${policy.semanticReview.apiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -785,6 +805,22 @@ function httpsOrigin(value) {
     parsed.hash
   ) {
     throw new Error("Remote endpoint must be a credential-free HTTPS URL");
+  }
+  if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
+  return parsed;
+}
+
+function localProxyBaseUrl(value) {
+  const parsed = new URL(value);
+  if (
+    parsed.protocol !== "http:" ||
+    (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error("Semantic verifier endpoint must be a credential-free localhost HTTP URL");
   }
   if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
   return parsed;

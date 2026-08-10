@@ -8,9 +8,13 @@ repository:
 workflow:
   path: .github/workflows/independent-verifier.yml
   event: pull_request_target
-  blobSha: 2fd8d9fc62f77f6c67c9a52891a06f85c0e95aea
+  runnerLabels:
+    - self-hosted
+    - macOS
+    - one-cli-verifier
+  blobSha: e947ad0c33093acc34f3a83aefa6ef26a40225a1
   policyVersion: one-cli.independent-verifier/v4
-  policyHash: f184299b1bb65516ef6fb3e2afd76ec2474f224990f07472e1ef1b98eb0dce9f
+  policyHash: 6953e9b1f3d3e98458b69cd20a156f896cf261b377686dad205774c2670696e7
 
 requiredChecks:
   - name: verify
@@ -34,6 +38,7 @@ protectedPaths:
     - .npmrc
     - package.json
     - package-lock.json
+    - scripts/bootstrap-verifier-runner.sh
     - scripts/independent-verifier.mjs
     - scripts/validate-autonomy.mjs
     - scripts/validate-harness.mjs
@@ -47,15 +52,19 @@ protectedPaths:
 
 semanticReview:
   quorum: 2
-  baseUrl: https://models.github.ai/inference/
-  tokenEnvironment: GITHUB_TOKEN
+  baseUrlEnvironment: ONE_CLI_VERIFIER_BASE_URL
+  repositoryBaseUrlEnvironment: ONE_CLI_VERIFIER_REPOSITORY_BASE_URL
+  defaultBaseUrl: http://127.0.0.1:8085/v1
+  apiKey: local-proxy
   profiles:
     - id: verifier-profile-a
       modelEnvironment: ONE_CLI_VERIFIER_MODEL_A
-      defaultModel: openai/gpt-4.1
+      repositoryModelEnvironment: ONE_CLI_VERIFIER_REPOSITORY_MODEL_A
+      defaultModel: claude-opus-4.8
     - id: verifier-profile-b
       modelEnvironment: ONE_CLI_VERIFIER_MODEL_B
-      defaultModel: openai/gpt-4.1-mini
+      repositoryModelEnvironment: ONE_CLI_VERIFIER_REPOSITORY_MODEL_B
+      defaultModel: gpt-5.4
 
 limits:
   maxChangedFiles: 300

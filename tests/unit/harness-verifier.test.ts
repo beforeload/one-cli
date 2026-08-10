@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 describe("trusted independent verifier policy", () => {
-  it("pins default branch, check producers, review actor, and two veto profiles", () => {
+  it("pins the runner, local proxy, check producers, and two veto profiles", () => {
     const policy = loadVerifierPolicy(POLICY);
     expect(policy).toMatchObject({
       schema: "one-cli.independent-verifier/v4",
@@ -44,7 +44,18 @@ describe("trusted independent verifier policy", () => {
         actor: "github-actions[bot]",
         actorId: 41898282,
       },
-      semanticReview: { quorum: 2 },
+      workflow: {
+        runnerLabels: ["self-hosted", "macOS", "one-cli-verifier"],
+      },
+      semanticReview: {
+        quorum: 2,
+        defaultBaseUrl: "http://127.0.0.1:8085/v1",
+        apiKey: "local-proxy",
+        profiles: [
+          { defaultModel: "claude-opus-4.8" },
+          { defaultModel: "gpt-5.4" },
+        ],
+      },
     });
     expect(policy.semanticReview.profiles).toHaveLength(2);
     expect(new Set(policy.semanticReview.profiles.map((profile) => profile.id)).size).toBe(2);
@@ -77,6 +88,7 @@ describe("trusted independent verifier policy", () => {
       ".npmrc",
       "package.json",
       "package-lock.json",
+      "scripts/bootstrap-verifier-runner.sh",
       "scripts/independent-verifier.mjs",
       "scripts/validate-autonomy.mjs",
       "scripts/validate-harness.mjs",

@@ -9,6 +9,7 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/+\-[\]]{0,255}$/u;
 export interface SemanticProfilePolicy {
   readonly id: string;
   readonly modelEnvironment: string;
+  readonly repositoryModelEnvironment: string;
   readonly defaultModel: string;
 }
 
@@ -22,6 +23,7 @@ export interface IndependentVerifierPolicy {
   readonly workflow: {
     readonly path: ".github/workflows/independent-verifier.yml";
     readonly event: "pull_request_target";
+    readonly runnerLabels: readonly ["self-hosted", "macOS", "one-cli-verifier"];
     readonly blobSha: string;
     readonly policyVersion: "one-cli.independent-verifier/v4";
     readonly policyHash: string;
@@ -45,8 +47,10 @@ export interface IndependentVerifierPolicy {
   };
   readonly semanticReview: {
     readonly quorum: 2;
-    readonly baseUrl: "https://models.github.ai/inference/";
-    readonly tokenEnvironment: "GITHUB_TOKEN";
+    readonly baseUrlEnvironment: "ONE_CLI_VERIFIER_BASE_URL";
+    readonly repositoryBaseUrlEnvironment: "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL";
+    readonly defaultBaseUrl: "http://127.0.0.1:8085/v1";
+    readonly apiKey: "local-proxy";
     readonly profiles: readonly [SemanticProfilePolicy, SemanticProfilePolicy];
   };
   readonly limits: {
@@ -103,12 +107,14 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   ], "verifier repository");
   const workflow = exactRecord(
     root.workflow,
-    ["path", "event", "blobSha", "policyVersion", "policyHash"],
+    ["path", "event", "runnerLabels", "blobSha", "policyVersion", "policyHash"],
     "verifier workflow",
   );
   if (
     workflow.path !== ".github/workflows/independent-verifier.yml" ||
     workflow.event !== "pull_request_target" ||
+    !Array.isArray(workflow.runnerLabels) ||
+    workflow.runnerLabels.join("\n") !== ["self-hosted", "macOS", "one-cli-verifier"].join("\n") ||
     typeof workflow.blobSha !== "string" ||
     !SHA.test(workflow.blobSha) ||
     workflow.policyVersion !== "one-cli.independent-verifier/v4" ||
@@ -167,15 +173,24 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   const prefixes = canonicalPaths(stringArray(protectedPaths.prefixes, "protected prefixes"), true);
   const semanticReview = exactRecord(
     root.semanticReview,
-    ["quorum", "baseUrl", "tokenEnvironment", "profiles"],
+    [
+      "quorum",
+      "baseUrlEnvironment",
+      "repositoryBaseUrlEnvironment",
+      "defaultBaseUrl",
+      "apiKey",
+      "profiles",
+    ],
     "semantic review policy",
   );
   if (semanticReview.quorum !== 2) throw new Error("Semantic review quorum must be exactly 2");
   if (
-    semanticReview.baseUrl !== "https://models.github.ai/inference/" ||
-    semanticReview.tokenEnvironment !== "GITHUB_TOKEN"
+    semanticReview.baseUrlEnvironment !== "ONE_CLI_VERIFIER_BASE_URL" ||
+    semanticReview.repositoryBaseUrlEnvironment !== "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL" ||
+    semanticReview.defaultBaseUrl !== "http://127.0.0.1:8085/v1" ||
+    semanticReview.apiKey !== "local-proxy"
   ) {
-    throw new Error("Semantic review must use GitHub Models with the ephemeral workflow token");
+    throw new Error("Semantic review must use the pinned local OpenAI-compatible proxy");
   }
   if (!Array.isArray(semanticReview.profiles) || semanticReview.profiles.length !== 2) {
     throw new Error("Semantic review requires exactly two profiles");
@@ -187,10 +202,20 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   if (new Set(profiles.map((profile) => profile.id)).size !== 2) {
     throw new Error("Semantic review profile IDs must be independent");
   }
-  for (const key of ["modelEnvironment", "defaultModel"] as const) {
+  for (const key of ["modelEnvironment", "repositoryModelEnvironment", "defaultModel"] as const) {
     if (profiles[0][key] === profiles[1][key]) {
       throw new Error(`Semantic review profiles must use distinct ${key} bindings`);
     }
+  }
+  if (
+    profiles[0]?.modelEnvironment !== "ONE_CLI_VERIFIER_MODEL_A" ||
+    profiles[0]?.repositoryModelEnvironment !== "ONE_CLI_VERIFIER_REPOSITORY_MODEL_A" ||
+    profiles[0]?.defaultModel !== "claude-opus-4.8" ||
+    profiles[1]?.modelEnvironment !== "ONE_CLI_VERIFIER_MODEL_B" ||
+    profiles[1]?.repositoryModelEnvironment !== "ONE_CLI_VERIFIER_REPOSITORY_MODEL_B" ||
+    profiles[1]?.defaultModel !== "gpt-5.4"
+  ) {
+    throw new Error("Semantic review must pin the two approved local proxy model profiles");
   }
   const limits = exactRecord(root.limits, [
     "maxChangedFiles",
@@ -214,6 +239,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     workflow: {
       path: ".github/workflows/independent-verifier.yml",
       event: "pull_request_target",
+      runnerLabels: ["self-hosted", "macOS", "one-cli-verifier"],
       blobSha: workflow.blobSha,
       policyVersion: "one-cli.independent-verifier/v4",
       policyHash: workflow.policyHash,
@@ -231,8 +257,10 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     protectedPaths: { exact, prefixes },
     semanticReview: {
       quorum: 2,
-      baseUrl: "https://models.github.ai/inference/",
-      tokenEnvironment: "GITHUB_TOKEN",
+      baseUrlEnvironment: "ONE_CLI_VERIFIER_BASE_URL",
+      repositoryBaseUrlEnvironment: "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL",
+      defaultBaseUrl: "http://127.0.0.1:8085/v1",
+      apiKey: "local-proxy",
       profiles,
     },
     limits: {
@@ -267,6 +295,7 @@ export function verifierPolicyHash(policy: IndependentVerifierPolicy): string {
     workflow: {
       path: policy.workflow.path,
       event: policy.workflow.event,
+      runnerLabels: policy.workflow.runnerLabels,
       policyVersion: policy.workflow.policyVersion,
     },
     requiredChecks: policy.requiredChecks,
@@ -319,10 +348,16 @@ export function inspectTrustedVerifier(
       "persist-credentials: false",
       "scripts/independent-verifier.mjs",
       "one-cli/independent-verifier",
+      "runs-on: [self-hosted, macOS, one-cli-verifier]",
+      "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL",
+      "ONE_CLI_VERIFIER_API_KEY: local-proxy",
       `ONE_CLI_VERIFIER_POLICY_VERSION: ${policy.workflow.policyVersion}`,
       `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
     ]) {
       if (!workflow.includes(expected)) throw new Error(`workflow lacks ${expected}`);
+    }
+    for (const rejected of ["ubuntu-latest", "macos-latest"]) {
+      if (workflow.includes(rejected)) throw new Error(`workflow contains retired verifier setting ${rejected}`);
     }
     const blobSha = crypto
       .createHash("sha1")
@@ -350,11 +385,16 @@ function parseProfile(value: unknown): SemanticProfilePolicy {
   const profile = exactRecord(value, [
     "id",
     "modelEnvironment",
+    "repositoryModelEnvironment",
     "defaultModel",
   ], "semantic profile");
   return {
     id: safeName(profile.id, "semantic profile ID"),
     modelEnvironment: environmentName(profile.modelEnvironment, "profile model environment"),
+    repositoryModelEnvironment: environmentName(
+      profile.repositoryModelEnvironment,
+      "profile repository model environment",
+    ),
     defaultModel: safeName(profile.defaultModel, "profile default model"),
   };
 }

@@ -100,6 +100,25 @@ describe("live governance readiness gate", () => {
     });
   });
 
+  it("blocks product execution without an online idle verifier runner", async () => {
+    const result = await port(readyProtection(), true, [{
+      id: 7,
+      status: "offline",
+      busy: false,
+      labels: [
+        { name: "self-hosted" },
+        { name: "macOS" },
+        { name: "one-cli-verifier" },
+      ],
+    }]).inspect();
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "runner-health",
+      ok: false,
+      detail: "No online, non-busy repository runner has exact self-hosted, macOS, one-cli-verifier labels",
+    });
+  });
+
   it("reports every invariant instead of collapsing readiness into one healthy flag", async () => {
     const result = await port(oldProtection()).inspect();
     expect(result.ready).toBe(false);
@@ -121,6 +140,7 @@ describe("live governance readiness gate", () => {
       "required-approvals",
       "last-push-approval",
       "runtime-no-protection-write",
+      "runner-health",
     ]));
   });
 });
@@ -128,6 +148,7 @@ describe("live governance readiness gate", () => {
 function port(
   protection: Record<string, unknown>,
   canApprovePullRequestReviews = true,
+  runners: unknown[] = [healthyRunner()],
 ): GhGovernanceReadinessPort {
   const responses: Record<string, unknown> = {
     "repos/beforeload/one-cli": { default_branch: "main" },
@@ -156,6 +177,10 @@ function port(
         pull_requests: "write",
       },
     },
+    "repos/beforeload/one-cli/actions/runners?per_page=100": {
+      total_count: runners.length,
+      runners,
+    },
   };
   const runner: ProcessRunner = {
     run: async (request: ProcessRequest) => {
@@ -175,6 +200,20 @@ function port(
     },
     policy: POLICY,
   });
+}
+
+function healthyRunner(): Record<string, unknown> {
+  return {
+    id: 7,
+    status: "online",
+    busy: false,
+    labels: [
+      { name: "self-hosted" },
+      { name: "macOS" },
+      { name: "ARM64" },
+      { name: "one-cli-verifier" },
+    ],
+  };
 }
 
 function readyProtection(): Record<string, unknown> {

@@ -57,6 +57,7 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
       actionsWorkflowResult,
       protectionResult,
       installationResult,
+      runnersResult,
     ] =
       await Promise.all([
         this.get(repositoryPath, signal),
@@ -75,6 +76,7 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         this.get(`${repositoryPath}/actions/permissions/workflow`, signal),
         this.get(`${defaultBranchPath}/protection`, signal),
         this.get("installation", signal),
+        this.get(`${repositoryPath}/actions/runners?per_page=100`, signal),
       ]);
 
     const checks: GovernanceReadinessCheck[] = [];
@@ -285,6 +287,49 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         : installation.error ??
           permissions.error ??
           "Runtime identity must have read-only repository administration permission",
+    );
+
+    const runnerInventory = resultRecord(runnersResult, "repository runner inventory");
+    const runners = Array.isArray(runnerInventory.value?.runners)
+      ? runnerInventory.value.runners
+      : [];
+    const runnerCount = runnerInventory.value?.total_count;
+    const runnerRecords = runners
+      .map((value) => record(value))
+      .filter((value): value is Record<string, unknown> => value !== undefined);
+    const boundedInventory =
+      typeof runnerCount === "number" &&
+      Number.isSafeInteger(runnerCount) &&
+      runnerCount >= 0 &&
+      runnerCount < 100 &&
+      runnerCount === runners.length &&
+      runnerRecords.length === runners.length;
+    const healthyRunners = boundedInventory
+      ? runnerRecords.filter((candidate) => {
+          if (!Array.isArray(candidate.labels)) return false;
+          const labelRecords = candidate.labels
+            .map((value) => record(value))
+            .filter((value): value is Record<string, unknown> => value !== undefined);
+          const labels = labelRecords
+            .map((value) => value.name)
+            .filter((value): value is string => typeof value === "string");
+          return candidate.status === "online" &&
+            candidate.busy === false &&
+            labelRecords.length === candidate.labels.length &&
+            labels.length === labelRecords.length &&
+            policy.workflow.runnerLabels.every((label) =>
+              labels.filter((candidateLabel) => candidateLabel === label).length === 1
+            );
+        })
+      : [];
+    const runnerHealthy = boundedInventory && healthyRunners.length >= 1;
+    add(
+      "runner-health",
+      runnerHealthy,
+      runnerHealthy
+        ? `${healthyRunners.length} online, non-busy repository verifier runner(s)`
+        : runnerInventory.error ??
+          "No online, non-busy repository runner has exact self-hosted, macOS, one-cli-verifier labels",
     );
 
     return {

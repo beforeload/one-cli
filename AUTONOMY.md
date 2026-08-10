@@ -75,7 +75,8 @@ The protected paths are:
 - `harness/**`;
 - `.npmrc`, whether or not it is currently present;
 - `package.json` and `package-lock.json`;
-- `scripts/independent-verifier.mjs`, `scripts/validate-autonomy.mjs`, and
+- `scripts/independent-verifier.mjs`,
+  `scripts/bootstrap-verifier-runner.sh`, `scripts/validate-autonomy.mjs`, and
   `scripts/validate-harness.mjs`; and
 - `tsconfig.json` and `tsconfig.build.json`.
 
@@ -99,15 +100,23 @@ must prove strict status checks, admin enforcement, disabled force pushes and
 deletions, exact App-pinned checks, stale-review dismissal, at least one
 approval, and last-push approval before product execution.
 
-The verifier uses GitHub's ephemeral workflow token and built-in GitHub Actions
-App identity; there is no custom App, local verifier key, or repository secret.
+The verifier and merge jobs run only on a repository runner with exact
+`self-hosted`, `macOS`, and `one-cli-verifier` labels. Governance readiness uses
+the owner read port to require at least one matching online, non-busy runner;
+an absent, offline, busy, or mislabeled runner blocks product execution.
+The verifier uses GitHub's ephemeral workflow token only for GitHub API,
+review, and merge operations under the built-in GitHub Actions App identity;
+there is no custom App, local verifier key, or repository secret.
 Applied verification requires the exact Actions and repository context, the
 trusted workflow blob and canonical policy hash, and, when `/user` is
 available, `github-actions[bot]` user ID `41898282`. It never queries
 `/installation` or an administration API.
-Two distinct GitHub Models profiles use that token and are veto-only with 2-of-2
-non-veto required; deterministic checks alone establish eligibility. The first
-job submits an exact-head review and must complete before a second job
+Two separate OpenAI-compatible calls use the runner-local proxy at
+`http://127.0.0.1:8085/v1`, placeholder key `local-proxy`, and distinct default
+models `claude-opus-4.8` and `gpt-5.4`. Host/repository variables may override
+the model IDs and localhost base URL, but pull-request content cannot. Both
+profiles are veto-only with 2-of-2 non-veto required; deterministic checks alone
+establish eligibility. The first job submits an exact-head review and must complete before a second job
 revalidates repository identity and `default_branch`, the live default-branch
 head, base SHA, head SHA, required-check App provenance, review actor/commit,
 and mergeability, then merges with an exact-SHA precondition. The workflow token

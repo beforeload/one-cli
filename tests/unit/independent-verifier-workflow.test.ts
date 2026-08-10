@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const workflow = read(".github/workflows/independent-verifier.yml");
 const script = read("scripts/independent-verifier.mjs");
+const policy = read("harness/verifier-policy.yml");
 
 describe("independent verifier trusted workflow", () => {
   it("runs for every PR class from exact trusted base code with isolated untrusted data", () => {
@@ -22,11 +23,11 @@ describe("independent verifier trusted workflow", () => {
     expect(workflow).toContain("name: one-cli/independent-verifier");
   });
 
-  it("uses only ephemeral built-in identity with least-privilege per-job permissions", () => {
+  it("uses the workflow token only for GitHub API writes with least privilege", () => {
     expect(workflow).not.toMatch(/create-github-app-token|PRIVATE_KEY|secrets\.|VERIFIER_TOKEN/u);
     expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/gu)).toHaveLength(2);
     expect(workflow).toMatch(
-      /verifier:[\s\S]*?permissions:\n\s+contents: read\n\s+checks: read\n\s+pull-requests: write\n\s+models: read/u,
+      /verifier:[\s\S]*?permissions:\n\s+contents: read\n\s+checks: read\n\s+pull-requests: write/u,
     );
     expect(workflow).toMatch(
       /merge:[\s\S]*?permissions:\n\s+contents: write\n\s+checks: read\n\s+pull-requests: read/u,
@@ -36,14 +37,26 @@ describe("independent verifier trusted workflow", () => {
     expect(workflow).toMatch(/ONE_CLI_VERIFIER_POLICY_SHA256: [0-9a-f]{64}/u);
   });
 
-  it("uses two distinct GitHub Models defaults without repository secrets", () => {
-    expect(workflow).toContain("'openai/gpt-4.1'");
-    expect(workflow).toContain("'openai/gpt-4.1-mini'");
+  it("uses two distinct local proxy defaults without repository secrets", () => {
+    expect(policy).toContain("defaultModel: claude-opus-4.8");
+    expect(policy).toContain("defaultModel: gpt-5.4");
+    expect(policy).toContain("defaultBaseUrl: http://127.0.0.1:8085/v1");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_MODEL_A");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_MODEL_B");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_BASE_URL");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_API_KEY: local-proxy");
+    expect(script).toContain("localProxyBaseUrl");
+    expect(script).toContain("policy.semanticReview.apiKey");
     expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_A");
     expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_B");
     expect(workflow).not.toMatch(/MODEL_[AB]_(?:API_KEY|BASE_URL)/u);
     expect(script).toContain("const semantic = await semanticReviews(");
     expect(script).not.toContain("if (protectedChange)");
+  });
+
+  it("pins verifier and merge jobs to the dedicated repository runner", () => {
+    expect(workflow.match(/runs-on: \[self-hosted, macOS, one-cli-verifier\]/gu)).toHaveLength(2);
+    expect(workflow).not.toMatch(/ubuntu-latest|macos-latest/u);
   });
 
   it("uses exact git objects and fails closed instead of accepting REST patches", () => {
