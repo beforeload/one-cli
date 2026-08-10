@@ -73,7 +73,7 @@ export class DarwinSandbox implements SandboxPort {
       throw new Error("sandbox-exec path must be absolute and NUL-free");
     }
     this.platform = options.platform ?? process.platform;
-    this.timeoutMs = positiveInteger(options.timeoutMs ?? 60_000, "Sandbox timeout");
+    this.timeoutMs = positiveInteger(options.timeoutMs ?? 10 * 60_000, "Sandbox timeout");
     this.maxOutputBytes = positiveInteger(
       options.maxOutputBytes ?? 2 * 1024 * 1024,
       "Sandbox output limit",

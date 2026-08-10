@@ -421,6 +421,23 @@ describe("portable autonomy adapters", () => {
     expect(result.stdout).toMatch(/^v\d+\.\d+\.\d+/u);
   });
 
+  it("keeps local quality gates bounded with a ten-minute default", async () => {
+    const workspace = path.join(root, "bounded-gate-workspace");
+    fs.mkdirSync(workspace);
+    const runner = new FakeProcessRunner();
+    const sandbox = new DarwinSandbox({
+      workspace,
+      commands: { echo: { executable: "/bin/echo", args: ["safe"] } },
+      runner,
+      platform: "darwin",
+      isExecutable: () => true,
+    });
+
+    await sandbox.run("echo");
+
+    expect(runner.requests[0]?.timeoutMs).toBe(10 * 60_000);
+  });
+
   it("escapes paths embedded in sandbox profiles", () => {
     const profile = buildDarwinSandboxProfile(
       '/tmp/workspace") (allow network*) ("',
