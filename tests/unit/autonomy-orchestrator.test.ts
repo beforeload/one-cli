@@ -143,7 +143,7 @@ describe("AutonomyOrchestrator", () => {
   );
 
   it("requires critical approvals before gates and publish", async () => {
-    const harness = createHarness("auto-pr", roots, { changedPath: "package.json" });
+    const harness = createHarness("auto-pr", roots, { changedPath: "scripts/release.mjs" });
     try {
       await harness.tick();
       await harness.tick();

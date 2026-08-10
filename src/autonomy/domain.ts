@@ -1,6 +1,75 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | { readonly [key: string]: JsonValue } | readonly JsonValue[];
 
+export type FailureReceiptSource =
+  | "local-process"
+  | "worker"
+  | "github-check"
+  | "reconciler";
+
+export interface FailureProvenance {
+  producer: "one-cli";
+  attemptId: string;
+  operationId: string;
+}
+
+/**
+ * A bounded, redacted, content-addressed record of one failed operation.
+ * It is intentionally additive so attempts written before receipts existed
+ * remain readable through their legacy `lastFailure` fields.
+ */
+export interface FailureReceipt {
+  schema: "autonomy.one-cli/failure-receipt-v1";
+  source: FailureReceiptSource;
+  provenance: FailureProvenance;
+  operation: string;
+  gate: string | null;
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  spawnError: string | null;
+  durationMs: number;
+  timedOut: boolean;
+  cancelled: boolean;
+  outputLimitExceeded: boolean;
+  issueDigest: string;
+  diffHash: string | null;
+  policyHash: string;
+  environmentHash: string;
+  timestamp: number;
+  fingerprint: string;
+  hash: string;
+}
+
+export type RecoveryEvidenceSource =
+  | "local-process"
+  | "worker"
+  | "github-check"
+  | "reconciler";
+
+export interface RecoveryEvidenceProvenance {
+  producer: string;
+  operationId: string;
+  observedAt: number;
+}
+
+/** Machine-verifiable evidence that is bound to exactly one failure fingerprint. */
+export interface RecoveryEvidence {
+  schema: "autonomy.one-cli/recovery-evidence-v1";
+  source: RecoveryEvidenceSource;
+  provenance: RecoveryEvidenceProvenance;
+  failureFingerprint: string;
+  failureReceiptHash: string;
+  summary: string;
+  hash: string;
+  authentication: {
+    algorithm: "hmac-sha256";
+    keyId: string;
+    mac: string;
+  };
+}
+
 export type AttemptState =
   | "pending"
   | "running"

@@ -3,4 +3,12 @@
 /.github/workflows/** @beforeload
 /.github/CODEOWNERS @beforeload
 /harness/** @beforeload
+/.npmrc @beforeload
+/package.json @beforeload
+/package-lock.json @beforeload
+/scripts/independent-verifier.mjs @beforeload
+/scripts/validate-autonomy.mjs @beforeload
+/scripts/validate-harness.mjs @beforeload
+/tsconfig.json @beforeload
+/tsconfig.build.json @beforeload
 /src/autonomy/roadmap-enforcement.ts @beforeload

@@ -8,10 +8,11 @@ import type {
 } from "./one-cli.js";
 import type { Roadmap } from "./roadmap.js";
 import { assertRoadmapParent, parentBody } from "./roadmap.js";
+import { HarnessRecovery } from "./recovery.js";
 import { seedRoadmap } from "./seed.js";
 import type { SeedOperationStore } from "./seed-state.js";
 
-const FAIL_CLOSED_STATES = new Set(["in_doubt", "blocked", "waiting_evidence"]);
+const FAIL_CLOSED_STATES = new Set(["in_doubt", "blocked"]);
 const SHA = /^[0-9a-f]{40,64}$/u;
 
 export interface RoadmapHandoff {
@@ -24,21 +25,31 @@ export interface RoadmapHandoff {
 
 export interface HarnessTickResult {
   action: string;
-  state: "succeeded" | "idle" | "blocked";
+  state: "succeeded" | "idle" | "blocked" | "parked" | "quarantined";
   phase: "roadmap" | "normal";
   detail: string;
+  lane?: "roadmap" | "normal" | "recovery";
+  nextAttemptAt?: number;
 }
 
 export class ColdStartSupervisor {
+  private readonly recovery: HarnessRecovery;
+
   constructor(
     private readonly dependencies: {
       roadmap: Roadmap;
       github: GitHubPort;
       oneCli: OneCliClient;
       journal: HostJournal;
+      recoveryKey?: Uint8Array;
       seedOperations: SeedOperationStore;
     },
-  ) {}
+  ) {
+    this.recovery = new HarnessRecovery({
+      ...dependencies,
+      recoveryKey: dependencies.recoveryKey ?? new Uint8Array(),
+    });
+  }
 
   async tick(signal?: AbortSignal): Promise<HarnessTickResult> {
     let initialIssues: Awaited<ReturnType<ColdStartSupervisor["loadIssues"]>>;
@@ -68,6 +79,24 @@ export class ColdStartSupervisor {
       ? roadmapBinding(initialNext.child.seedMarker, initialNext.issue.number)
       : undefined;
     let status = await this.dependencies.oneCli.status("roadmap-only", initialBinding, signal);
+    const recoveryScope = initialNext ? "roadmap-only" : "normal";
+    const recovery = await this.recovery.recoverWaitingAttempt(
+      status,
+      recoveryScope,
+      recoveryScope === "roadmap-only" ? initialBinding : undefined,
+      signal,
+    );
+    if (recovery) return recovery;
+    if (initialNext) {
+      const remediation = await this.recovery.remediateExhaustedRoadmapFailure(
+        status,
+        initialNext.issue,
+        initialNext.child,
+        invariantParent.number,
+        signal,
+      );
+      if (remediation) return remediation;
+    }
     const preflight = blockedStatus(status);
     if (preflight) return this.block("status", preflight);
     const preEvidence = await this.roadmapEvidence(status, signal);
@@ -176,9 +205,18 @@ export class ColdStartSupervisor {
     if (!finalDelivery || !finalMergeSha) {
       return this.block("handoff", "Final roadmap delivery evidence is incomplete");
     }
+    const expected: RoadmapHandoff = {
+      parentNumber: parent.number,
+      finalChildIssueNumber: finalDelivery.issue.number,
+      finalPullNumber: finalDelivery.pull.number,
+      finalMergeSha,
+      activeReleaseSha: finalMergeSha,
+    };
     let handoff: RoadmapHandoff | undefined;
+    let reservation: RoadmapHandoff | undefined;
     try {
       handoff = readRoadmapHandoff(this.dependencies.journal);
+      reservation = readRoadmapHandoffReservation(this.dependencies.journal);
     } catch (error) {
       return this.block(
         "handoff",
@@ -188,13 +226,6 @@ export class ColdStartSupervisor {
     }
     const activeRelease = this.dependencies.oneCli.activeRelease();
     if (handoff) {
-      const expected: RoadmapHandoff = {
-        parentNumber: parent.number,
-        finalChildIssueNumber: finalDelivery.issue.number,
-        finalPullNumber: finalDelivery.pull.number,
-        finalMergeSha,
-        activeReleaseSha: finalMergeSha,
-      };
       if (!sameHandoff(handoff, expected)) {
         return this.block(
           "handoff",
@@ -236,6 +267,25 @@ export class ColdStartSupervisor {
         "Active immutable release must match the final delivered roadmap merge SHA at handoff",
       );
     }
+    if (reservation && !sameHandoff(reservation, expected)) {
+      return this.block(
+        "handoff",
+        "Durable roadmap handoff reservation does not match current parent and final delivery",
+        "normal",
+      );
+    }
+    if (!reservation) {
+      if (parent.state === "closed") {
+        return this.block(
+          "handoff",
+          "Closed roadmap parent is missing an exact durable handoff reservation",
+          "normal",
+        );
+      }
+      this.dependencies.journal.append("roadmap.handoff.reserved", { ...expected });
+      reservation = expected;
+    }
+    let closedParent = false;
     if (parent.state === "open") {
       const summary = evidence.delivered
         .map((item) => `- #${item.issue.number} via PR #${item.pull.number} at ${item.pull.mergeSha}`)
@@ -249,29 +299,36 @@ export class ColdStartSupervisor {
         },
         signal,
       );
+      closedParent = true;
+    }
+    const deliveryAlreadyRecorded = this.dependencies.journal
+      .read(Number.MAX_SAFE_INTEGER)
+      .some((event) =>
+      event.type === "harness.roadmap-delivered" &&
+      event.data.parentNumber === parent.number
+    );
+    if (!deliveryAlreadyRecorded) {
       this.dependencies.journal.append("harness.roadmap-delivered", {
         parentNumber: parent.number,
         children: evidence.delivered.length,
       });
-      this.dependencies.journal.append("roadmap.handoff.completed", {
-        parentNumber: parent.number,
-        finalChildIssueNumber: finalDelivery.issue.number,
-        finalPullNumber: finalDelivery.pull.number,
-        finalMergeSha,
-        activeReleaseSha: activeRelease.sha,
-      });
-      return {
-        action: "close-parent",
-        state: "succeeded",
-        phase: "roadmap",
-        detail: `Closed roadmap parent #${parent.number} with delivery evidence`,
-      };
     }
-    return this.block(
-      "handoff",
-      "Closed roadmap parent is missing durable handoff evidence",
-      "normal",
-    );
+    this.dependencies.journal.append("roadmap.handoff.completed", { ...reservation });
+    if (!closedParent && deliveryAlreadyRecorded) {
+      return this.block(
+        "handoff",
+        "Recovered an interrupted completed parent handoff; normal execution resumes next tick",
+        "normal",
+      );
+    }
+    return {
+      action: closedParent ? "close-parent" : "complete-handoff",
+      state: "succeeded",
+      phase: "roadmap",
+      detail: closedParent
+        ? `Closed roadmap parent #${parent.number} with delivery evidence`
+        : `Reconciled closed roadmap parent #${parent.number} into completed handoff`,
+    };
   }
 
   private async roadmapEvidence(
@@ -371,6 +428,34 @@ export class ColdStartSupervisor {
     tick: TickOutput,
     phase: HarnessTickResult["phase"],
   ): HarnessTickResult {
+    if (tick.state === "waiting_evidence") {
+      this.dependencies.journal.append("harness.recovery-pending", {
+        phase,
+        action: tick.action,
+        attemptId: tick.attemptId ?? null,
+      });
+      return {
+        action: tick.action,
+        state: "parked",
+        phase,
+        lane: "recovery",
+        detail: tick.detail ?? "Machine recovery evidence will be collected on the next tick",
+      };
+    }
+    if (tick.state === "failed") {
+      this.dependencies.journal.append("harness.recovery-exhausted", {
+        phase,
+        action: tick.action,
+        attemptId: tick.attemptId ?? null,
+      });
+      return {
+        action: tick.action,
+        state: "quarantined",
+        phase,
+        lane: "recovery",
+        detail: tick.detail ?? "Recovery limit reached; remediation will reconcile next",
+      };
+    }
     const blocked = FAIL_CLOSED_STATES.has(tick.state);
     this.dependencies.journal.append(
       blocked ? "harness.tick-blocked" : "harness.tick-completed",
@@ -386,6 +471,7 @@ export class ColdStartSupervisor {
       action: tick.action,
       state: blocked ? "blocked" : tick.state === "idle" ? "idle" : "succeeded",
       phase,
+      lane: phase,
       detail: tick.detail ?? tick.state,
     };
   }
@@ -396,7 +482,7 @@ export class ColdStartSupervisor {
     phase: HarnessTickResult["phase"] = "roadmap",
   ): HarnessTickResult {
     this.dependencies.journal.append("harness.fail-closed", { action, detail });
-    return { action, state: "blocked", phase, detail };
+    return { action, state: "blocked", phase, lane: phase, detail };
   }
 }
 
@@ -411,6 +497,18 @@ export function readRoadmapHandoff(journal: HostJournal): RoadmapHandoff | undef
     return undefined;
   }
   return parseRoadmapHandoff(handoffs[0]!);
+}
+
+export function readRoadmapHandoffReservation(
+  journal: HostJournal,
+): RoadmapHandoff | undefined {
+  const reservations = journal
+    .read(Number.MAX_SAFE_INTEGER)
+    .filter((event) => event.type === "roadmap.handoff.reserved");
+  if (reservations.length > 1) {
+    throw new Error("Durable roadmap handoff reservation is duplicated");
+  }
+  return reservations[0] ? parseRoadmapHandoff(reservations[0]) : undefined;
 }
 
 function blockedStatus(status: AutonomyStatus): string | undefined {

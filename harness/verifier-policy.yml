@@ -1,0 +1,67 @@
+schema: one-cli.independent-verifier/v3
+
+repository:
+  owner: beforeload
+  name: one-cli
+  defaultBranch: main
+
+workflow:
+  path: .github/workflows/independent-verifier.yml
+  event: pull_request_target
+  blobSha: c673004af63c31033aaa121b21aff72cea4a5f8c
+  policyVersion: one-cli.independent-verifier/v3
+
+requiredChecks:
+  - name: verify
+    # GitHub Actions App. Branch protection should pin this App where supported.
+    appId: 15368
+
+emittedCheck:
+  name: one-cli/independent-verifier
+  appIdEnvironment: ONE_CLI_VERIFIER_APP_ID
+
+reviewIdentity:
+  appIdEnvironment: ONE_CLI_VERIFIER_APP_ID
+  appSlug: one-cli-verifier
+  actor: one-cli-verifier[bot]
+
+protectedPaths:
+  exact:
+    - AUTONOMY.md
+    - .github/CODEOWNERS
+    - .npmrc
+    - package.json
+    - package-lock.json
+    - scripts/independent-verifier.mjs
+    - scripts/validate-autonomy.mjs
+    - scripts/validate-harness.mjs
+    - tsconfig.json
+    - tsconfig.build.json
+    - harness/tsconfig.json
+  prefixes:
+    - .autonomy/
+    - .github/workflows/
+    - harness/
+
+semanticReview:
+  quorum: 2
+  profiles:
+    - id: verifier-profile-a
+      apiKeyEnvironment: ONE_CLI_VERIFIER_MODEL_A_API_KEY
+      modelEnvironment: ONE_CLI_VERIFIER_MODEL_A
+      baseUrlEnvironment: ONE_CLI_VERIFIER_MODEL_A_BASE_URL
+    - id: verifier-profile-b
+      apiKeyEnvironment: ONE_CLI_VERIFIER_MODEL_B_API_KEY
+      modelEnvironment: ONE_CLI_VERIFIER_MODEL_B
+      baseUrlEnvironment: ONE_CLI_VERIFIER_MODEL_B_BASE_URL
+
+limits:
+  maxChangedFiles: 300
+  maxDiffBytes: 1048576
+  maxModelOutputBytes: 16384
+  requestTimeoutMs: 60000
+  verifyWaitMs: 1200000
+
+merge:
+  enabled: true
+  method: merge

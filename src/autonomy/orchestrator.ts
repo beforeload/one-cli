@@ -3,7 +3,15 @@ import path from "node:path";
 import type { RunConfig } from "../config.js";
 import type { ChatProvider } from "../domain.js";
 import type { AutonomyConfig } from "./config.js";
-import type { Attempt, IssueClaimEvidence, JsonValue, LeaseGrant } from "./domain.js";
+import type {
+  Attempt,
+  FailureReceipt,
+  FailureReceiptSource,
+  IssueClaimEvidence,
+  JsonValue,
+  LeaseGrant,
+  RecoveryEvidence,
+} from "./domain.js";
 import type {
   GitDiff,
   GitRepository,
@@ -32,7 +40,16 @@ import {
   type TrustedIntake,
 } from "./intake.js";
 import { LeaseCoordinator, LeaseConflictError, LeaseLostError } from "./lease.js";
-import type { ProcessResult } from "./process.js";
+import {
+  assertFailureReceipt,
+  assertRecoveryEvidence,
+  createFailureReceipt,
+  deriveMachineRecoveryDecision,
+  redactAndBound,
+  runtimeEnvironmentHash,
+  type MachineRecoveryDecision,
+  type ProcessResult,
+} from "./process.js";
 import type {
   ReleaseCandidateBinding,
   ReleaseManager,
@@ -131,6 +148,20 @@ export interface TickResult {
   state: string;
   attemptId?: string;
   detail?: string;
+}
+
+export type MachineRecoveryTarget = "implementing" | "verifying";
+
+export interface MachineRecoveryOptions {
+  authenticationKey: Uint8Array;
+}
+
+export interface FailureGateProbeResult {
+  schema: "autonomy.one-cli/failure-gate-probe-v1";
+  attemptId: string;
+  gate: string;
+  recovered: boolean;
+  receipt: FailureReceipt;
 }
 
 export interface IssueClaimInspection {
@@ -486,8 +517,19 @@ export class AutonomyOrchestrator {
     evidence: string,
     signal: AbortSignal,
   ): Promise<TickResult> {
+    return await this.breakGlassRetryAttempt(attemptId, evidence, signal);
+  }
+
+  /** Explicit manual break-glass path retained for compatibility with older callers. */
+  async breakGlassRetryAttempt(
+    attemptId: string,
+    evidence: string,
+    signal: AbortSignal,
+  ): Promise<TickResult> {
+    this.assertExecutionScope(this.requiredAttempt(attemptId));
     return await this.withCoordinatorLease(async () => {
       let attempt = this.requiredAttempt(attemptId);
+      this.assertExecutionScope(attempt);
       if (
         attempt.state !== "waiting" &&
         attempt.state !== "waiting_evidence" &&
@@ -498,7 +540,10 @@ export class AutonomyOrchestrator {
       const lastFailure = asRecord(detailObject(attempt).lastFailure);
       const fingerprint =
         typeof lastFailure.fingerprint === "string" ? lastFailure.fingerprint : undefined;
-      let boundedEvidence = evidence.trim().replace(/\s+/gu, " ").slice(0, 4_096);
+      let boundedEvidence = redactAndBound(
+        evidence.trim().replace(/\s+/gu, " "),
+        this.dependencies.config.recoveryPolicy.manualBreakGlass.maxEvidenceBytes,
+      );
       if (fingerprint && !boundedEvidence) {
         const localIssue = this.dependencies.store.getIssue(attempt.issueId);
         const remoteIssue = await this.dependencies.github.getIssue(
@@ -601,6 +646,391 @@ export class AutonomyOrchestrator {
         evidenceRecorded: Boolean(fingerprint),
       });
       return { action: "retry", state: retried.state, attemptId: retried.id };
+    });
+  }
+
+  /**
+   * Retries from content-addressed machine evidence. The provenance operation ID
+   * is the durable idempotency key; this path never consumes manual break-glass text.
+   */
+  async retryAttemptWithMachineEvidence(
+    attemptId: string,
+    evidence: RecoveryEvidence,
+    signal: AbortSignal,
+    options: MachineRecoveryOptions,
+  ): Promise<TickResult> {
+    const initialAttempt = this.requiredAttempt(attemptId);
+    this.assertExecutionScope(initialAttempt);
+    const initialRecovery = this.verifyMachineRecovery(
+      initialAttempt,
+      evidence,
+      options.authenticationKey,
+    );
+    return await this.withCoordinatorLease(async () => {
+      const scopedAttempt = this.requiredAttempt(attemptId);
+      this.assertExecutionScope(scopedAttempt);
+      const recovery = this.verifyMachineRecovery(
+        scopedAttempt,
+        evidence,
+        options.authenticationKey,
+      );
+      if (
+        recovery.receipt.hash !== initialRecovery.receipt.hash ||
+        recovery.decision.diagnosis !== initialRecovery.decision.diagnosis ||
+        recovery.decision.target !== initialRecovery.decision.target
+      ) {
+        throw new Error("Machine recovery binding changed before reservation");
+      }
+      const operationKey = `machine-retry:${attemptId}:${evidence.provenance.operationId}`;
+      const reservation = this.dependencies.store.reserveOperation({
+        id: this.id(),
+        idempotencyKey: operationKey,
+        kind: "autonomy.machine-retry",
+        request: jsonValue({
+          evidence,
+          diagnosis: recovery.decision.diagnosis,
+          target: recovery.decision.target,
+        }),
+        attemptId,
+        now: this.now(),
+      });
+      if (!reservation.created && reservation.operation.state === "succeeded") {
+        const result = asRecord(reservation.operation.result);
+        return {
+          action: typeof result.action === "string" ? result.action : "machine-retry",
+          state: typeof result.state === "string" ? result.state : "unchanged",
+          attemptId,
+        };
+      }
+      if (!reservation.created && reservation.operation.state === "failed") {
+        throw new Error(
+          reservation.operation.error ?? "Machine retry operation previously failed",
+        );
+      }
+      if (!reservation.created && reservation.operation.state === "reserved") {
+        const recovered = this.requiredAttempt(attemptId);
+        const detail = detailObject(recovered);
+        if (
+          detail.machineRetry === true &&
+          detail.recoveryOperationId === evidence.provenance.operationId &&
+          detail.recoveryEvidenceHash === evidence.hash
+        ) {
+          const result = {
+            action: "machine-retry",
+            state: recovered.state,
+            attemptId: recovered.id,
+          };
+          this.dependencies.store.reconcileOperation({
+            idempotencyKey: operationKey,
+            state: "succeeded",
+            result,
+            now: this.now(),
+          });
+          return result;
+        }
+      }
+
+      try {
+        let attempt = this.requiredAttempt(attemptId);
+        this.assertExecutionScope(attempt);
+        const verified = this.verifyMachineRecovery(
+          attempt,
+          evidence,
+          options.authenticationKey,
+        );
+        if (
+          attempt.state !== "waiting" &&
+          attempt.state !== "waiting_evidence" &&
+          attempt.state !== "blocked"
+        ) {
+          throw new Error(
+            "Only waiting, waiting_evidence, or blocked attempts can be machine-retried",
+          );
+        }
+        const lastFailure = asRecord(detailObject(attempt).lastFailure);
+        const priorEvidence = Array.isArray(detailObject(attempt).failureEvidence)
+          ? [...(detailObject(attempt).failureEvidence as readonly JsonValue[])]
+          : [];
+        if (
+          priorEvidence.some(
+            (item) =>
+              asRecord(item).hash === evidence.hash &&
+              asRecord(asRecord(item).provenance).operationId !==
+                evidence.provenance.operationId,
+          )
+        ) {
+          throw new Error("Recovery evidence hash was already used by another operation");
+        }
+        if (!priorEvidence.some((item) => asRecord(item).hash === evidence.hash)) {
+          priorEvidence.push(jsonValue(evidence));
+        }
+
+        attempt = await this.reacquireClaimForRecovery(attempt, signal, priorEvidence);
+        if (attempt.state === "in_doubt") {
+          const result = { action: "machine-retry", state: "in_doubt", attemptId };
+          this.dependencies.store.reconcileOperation({
+            idempotencyKey: operationKey,
+            state: "succeeded",
+            result,
+            now: this.now(),
+          });
+          return result;
+        }
+        if (attempt.branch) {
+          const repository = await this.repository(signal);
+          const publishedHead = await this.dependencies.git.remoteBranchHead(
+            repository,
+            "origin",
+            attempt.branch,
+            signal,
+          );
+          if (publishedHead === attempt.headSha) {
+            const released = await this.releaseClaimBeforeTerminal(
+              attempt,
+              signal,
+              "machine-recovery-publication-proven",
+            );
+            if (!released) {
+              const result = { action: "machine-retry", state: "in_doubt", attemptId };
+              this.dependencies.store.reconcileOperation({
+                idempotencyKey: operationKey,
+                state: "succeeded",
+                result,
+                now: this.now(),
+              });
+              return result;
+            }
+            attempt = released;
+          }
+        }
+        const target =
+          verified.decision.target === "same-state"
+            ? recoveryResumeState(attempt)
+            : verified.decision.target;
+        if (!target) throw new Error("Verified failure receipt is not eligible for machine retry");
+        const retried = this.safeTransition(attempt, target, {
+          machineRetry: true,
+          recoveryEvidenceHash: evidence.hash,
+          recoveryOperationId: evidence.provenance.operationId,
+          recoveryTarget: target,
+          recoveryDiagnosis: verified.decision.diagnosis,
+          recoveryReceipt: jsonValue(verified.receipt),
+        });
+        const result = {
+          action: "machine-retry",
+          state: retried.state,
+          attemptId: retried.id,
+        };
+        this.dependencies.store.reconcileOperation({
+          idempotencyKey: operationKey,
+          state: "succeeded",
+          result,
+          now: this.now(),
+        });
+        return result;
+      } catch (error) {
+        this.dependencies.store.reconcileOperation({
+          idempotencyKey: operationKey,
+          state: "failed",
+          error: redactAndBound(
+            error instanceof Error ? error.message : String(error),
+            this.dependencies.config.recoveryPolicy.receipts.maxSpawnErrorBytes,
+          ),
+          now: this.now(),
+        });
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Re-runs only the exact configured local gate bound to a waiting attempt.
+   * It writes local evidence but performs no Git or GitHub mutation.
+   */
+  async probeAttemptFailureGate(
+    attemptId: string,
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<FailureGateProbeResult> {
+    this.assertExecutionScope(this.requiredAttempt(attemptId));
+    return await this.withCoordinatorLease(async () => {
+      this.assertExecutionScope(this.requiredAttempt(attemptId));
+      const boundedOperationId = operationId.trim();
+      if (
+        !boundedOperationId ||
+        Buffer.byteLength(boundedOperationId) > 512 ||
+        /[\0\r\n]/u.test(boundedOperationId)
+      ) {
+        throw new Error("Failure gate probe operation ID is invalid");
+      }
+      const operationKey = `failure-gate-probe:${attemptId}:${boundedOperationId}`;
+      const reservation = this.dependencies.store.reserveOperation({
+        id: this.id(),
+        idempotencyKey: operationKey,
+        kind: "autonomy.failure-gate-probe",
+        request: { attemptId, operationId: boundedOperationId },
+        attemptId,
+        now: this.now(),
+      });
+      if (!reservation.created && reservation.operation.state === "succeeded") {
+        const prior = asRecord(reservation.operation.result);
+        const receipt = asRecord(prior.receipt) as unknown as FailureReceipt;
+        if (
+          prior.schema !== "autonomy.one-cli/failure-gate-probe-v1" ||
+          typeof prior.gate !== "string" ||
+          typeof prior.recovered !== "boolean" ||
+          receipt.schema !== "autonomy.one-cli/failure-receipt-v1"
+        ) {
+          throw new Error("Stored failure gate probe result is invalid");
+        }
+        return {
+          schema: prior.schema,
+          attemptId,
+          gate: prior.gate,
+          recovered: prior.recovered,
+          receipt,
+        };
+      }
+      if (!reservation.created && reservation.operation.state === "failed") {
+        throw new Error(
+          reservation.operation.error ?? "Failure gate probe previously failed",
+        );
+      }
+      if (!reservation.created && reservation.operation.state === "reserved") {
+        const attempt = this.requiredAttempt(attemptId);
+        const recoveryProbes = detailObject(attempt).recoveryProbes;
+        const priorProbe = (Array.isArray(recoveryProbes) ? recoveryProbes : [])
+          .map(asRecord)
+          .find((candidate) =>
+            asRecord(asRecord(candidate.receipt).provenance).operationId === boundedOperationId
+          );
+        const receipt = priorProbe
+          ? asRecord(priorProbe.receipt) as unknown as FailureReceipt
+          : undefined;
+        if (
+          priorProbe?.schema === "autonomy.one-cli/failure-gate-probe-v1" &&
+          typeof priorProbe.gate === "string" &&
+          typeof priorProbe.recovered === "boolean" &&
+          receipt?.schema === "autonomy.one-cli/failure-receipt-v1"
+        ) {
+          const result: FailureGateProbeResult = {
+            schema: priorProbe.schema,
+            attemptId,
+            gate: priorProbe.gate,
+            recovered: priorProbe.recovered,
+            receipt,
+          };
+          this.dependencies.store.reconcileOperation({
+            idempotencyKey: operationKey,
+            state: "succeeded",
+            result: jsonValue(result),
+            now: this.now(),
+          });
+          return result;
+        }
+      }
+      try {
+        const attempt = this.requiredAttempt(attemptId);
+        this.assertExecutionScope(attempt);
+        if (!["waiting", "waiting_evidence", "blocked"].includes(attempt.state)) {
+          throw new Error("Failure gate probe requires a waiting or blocked attempt");
+        }
+        const lastFailure = asRecord(detailObject(attempt).lastFailure);
+        const priorReceipt = asRecord(lastFailure.receipt);
+        const operation =
+          typeof lastFailure.operation === "string"
+            ? lastFailure.operation
+            : typeof priorReceipt.operation === "string"
+              ? priorReceipt.operation
+              : "";
+        const gate =
+          typeof priorReceipt.gate === "string"
+            ? priorReceipt.gate
+            : operation.startsWith("gate:")
+              ? operation.slice("gate:".length)
+              : "";
+        if (
+          !gate ||
+          !this.dependencies.config.qualityGates.localCommands.some(
+            (candidate) => candidate.name === gate,
+          )
+        ) {
+          throw new Error("Attempt failure is not bound to an exact configured local gate");
+        }
+        const sandbox = this.dependencies.sandboxFactory(this.worktree(attempt).path);
+        const availability = sandbox.availability();
+        if (!availability.available) {
+          throw new Error(availability.reason ?? "Bound recovery sandbox is unavailable");
+        }
+        const process = await sandbox.run(gate, signal);
+        const receipt = this.failureReceipt(
+          attempt,
+          `gate:${gate}`,
+          process,
+          gate,
+          "local-process",
+          boundedOperationId,
+        );
+        const recovered = processSucceeded(process);
+        const probe = {
+          schema: "autonomy.one-cli/failure-gate-probe-v1" as const,
+          attemptId,
+          gate,
+          recovered,
+          receipt,
+        };
+        const detail = detailObject(attempt);
+        const failures = asRecord(detail.failures);
+        const priorCount =
+          typeof lastFailure.count === "number" &&
+          Number.isSafeInteger(lastFailure.count) &&
+          lastFailure.count > 0
+            ? lastFailure.count
+            : 1;
+        const recordedCount =
+          typeof failures[receipt.fingerprint] === "number"
+            ? failures[receipt.fingerprint] as number
+            : 0;
+        failures[receipt.fingerprint] = Math.max(priorCount, recordedCount);
+        const probes = Array.isArray(detail.recoveryProbes)
+          ? [...detail.recoveryProbes, jsonValue(probe)]
+          : [jsonValue(probe)];
+        this.updateAttempt(attempt, {
+          detail: mergeDetail(attempt, {
+            lastFailure: {
+              ...lastFailure,
+              operation: `gate:${gate}`,
+              exitCode: receipt.exitCode,
+              normalized: redactAndBound(
+                receipt.stderr || receipt.spawnError || receipt.stdout || "gate recovered",
+                2_000,
+              ),
+              fingerprint: receipt.fingerprint,
+              receipt: jsonValue(receipt),
+            },
+            failureReceipts: this.appendFailureReceipt(attempt, receipt),
+            failures,
+            recoveryProbes: probes.slice(
+              -this.dependencies.config.recoveryPolicy.receipts.maxReceiptsPerAttempt,
+            ),
+          }),
+        });
+        this.dependencies.store.reconcileOperation({
+          idempotencyKey: operationKey,
+          state: "succeeded",
+          result: jsonValue(probe),
+          now: this.now(),
+        });
+        return probe;
+      } catch (error) {
+        this.dependencies.store.reconcileOperation({
+          idempotencyKey: operationKey,
+          state: "failed",
+          error: redactAndBound(errorMessage(error), 1_024),
+          now: this.now(),
+        });
+        throw error;
+      }
     });
   }
 
@@ -1112,6 +1542,14 @@ export class AutonomyOrchestrator {
           title: this.dependencies.store.getIssue(current.issueId)?.title ?? "",
           fields: detailObject(current).issueFields ?? {},
           ...(approvedPaths === undefined ? {} : { approvedPaths }),
+          ...(detailObject(current).recoveryDiagnosis === undefined
+            ? {}
+            : {
+                recovery: {
+                  diagnosis: detailObject(current).recoveryDiagnosis,
+                  receipt: detailObject(current).recoveryReceipt ?? null,
+                },
+              }),
         },
         ...(approvedPaths === undefined ? {} : { approvedPaths }),
         provider: this.dependencies.provider,
@@ -1142,6 +1580,8 @@ export class AutonomyOrchestrator {
         worker.result.exitCode,
         worker.result.reason,
         signal,
+        undefined,
+        "worker",
       );
     }
     this.transitionAttempt(current, "verifying");
@@ -1260,9 +1700,15 @@ export class AutonomyOrchestrator {
       const result = await sandbox.run(gate.name, signal);
       if (!processSucceeded(result)) {
         if (isTransient(result.stderr)) {
+          const receipt = this.failureReceipt(
+            current,
+            `gate:${gate.name}`,
+            result,
+            gate.name,
+          );
           return this.transitionToWaiting(current, "verifying", {
             gate: gate.name,
-            error: result.stderr,
+            failureReceipt: jsonValue(receipt),
           });
         }
         return await this.handleFailure(
@@ -1271,6 +1717,8 @@ export class AutonomyOrchestrator {
           result.exitCode,
           result.stderr || result.spawnError || "gate failed",
           signal,
+          result,
+          "local-process",
         );
       }
     }
@@ -1489,6 +1937,8 @@ export class AutonomyOrchestrator {
         1,
         "required GitHub check failed",
         signal,
+        undefined,
+        "github-check",
       );
     }
     const current = this.updateAttempt(attempt, {
@@ -1703,7 +2153,7 @@ export class AutonomyOrchestrator {
     commands.push("smoke");
     for (const command of commands) {
       const result = await sandbox.run(command, signal);
-      dogfoodEvidence.push({ command, result: jsonValue(result) });
+      dogfoodEvidence.push({ command, result: this.processEvidence(result) });
       if (!processSucceeded(result)) {
         return await this.postMergeDogfoodFailure(
           current,
@@ -1713,6 +2163,7 @@ export class AutonomyOrchestrator {
           result.stderr || result.spawnError || `post-merge ${command} failed`,
           dogfoodEvidence,
           signal,
+          result,
         );
       }
     }
@@ -1862,16 +2313,28 @@ export class AutonomyOrchestrator {
     error: string,
     evidence: readonly { command: string; result: JsonValue }[],
     signal: AbortSignal,
+    processResult?: ProcessResult,
   ): Promise<TickResult> {
-    const normalized = error.trim().replace(/\s+/gu, " ").slice(0, 2_000);
-    const fingerprint = crypto
-      .createHash("sha256")
-      .update(`${mergeSha}\0${command}\0${exitCode ?? "null"}\0${normalized}`)
-      .digest("hex");
+    const normalized = redactAndBound(error.trim().replace(/\s+/gu, " "), 2_000);
+    const receipt = this.failureReceipt(
+      attempt,
+      `post-merge:${command}`,
+      processResult ?? syntheticProcessResult(exitCode, normalized),
+      command,
+    );
+    const fingerprint = receipt.fingerprint;
     let current = this.updateAttempt(attempt, {
       detail: mergeDetail(attempt, {
         postMergeDogfood: jsonValue(evidence),
-        postMergeFailure: { mergeSha, command, exitCode, normalized, fingerprint },
+        postMergeFailure: {
+          mergeSha,
+          command,
+          exitCode,
+          normalized,
+          fingerprint,
+          receipt: jsonValue(receipt),
+        },
+        failureReceipts: this.appendFailureReceipt(attempt, receipt),
       }),
     });
     let promotedIssueNumber: number | undefined;
@@ -1902,6 +2365,7 @@ export class AutonomyOrchestrator {
           exitCode,
           normalized,
           fingerprint,
+          receipt: jsonValue(receipt),
           ...(promotedIssueNumber === undefined ? {} : { promotedIssueNumber }),
           ...(promotionError === undefined ? {} : { promotionError }),
         },
@@ -1925,14 +2389,19 @@ export class AutonomyOrchestrator {
     exitCode: number | null,
     error: string,
     signal?: AbortSignal,
+    processResult?: ProcessResult,
+    source: FailureReceiptSource = "reconciler",
   ): Promise<TickResult> {
-    const normalized = error.trim().replace(/\s+/gu, " ").slice(0, 2_000);
-    const failureIssueDigest =
-      this.dependencies.store.getIssue(attempt.issueId)?.digest ?? "missing-issue";
-    const fingerprint = crypto
-      .createHash("sha256")
-      .update(`${failureIssueDigest}\0${operation}\0${exitCode ?? "null"}\0${normalized}`)
-      .digest("hex");
+    const normalized = redactAndBound(error.trim().replace(/\s+/gu, " "), 2_000);
+    const receipt = this.failureReceipt(
+      attempt,
+      operation,
+      processResult ?? syntheticProcessResult(exitCode, normalized),
+      operation.startsWith("gate:") ? operation.slice("gate:".length) : undefined,
+      source,
+    );
+    const failureIssueDigest = receipt.issueDigest;
+    const fingerprint = receipt.fingerprint;
     const detail = detailObject(attempt);
     const failures = asRecord(detail.failures);
     const count = typeof failures[fingerprint] === "number" ? (failures[fingerprint] as number) + 1 : 1;
@@ -1947,7 +2416,9 @@ export class AutonomyOrchestrator {
           issueDigest: failureIssueDigest,
           fingerprint,
           count,
+          receipt: jsonValue(receipt),
         },
+        failureReceipts: this.appendFailureReceipt(attempt, receipt),
         failureEvidence: Array.isArray(detail.failureEvidence)
           ? detail.failureEvidence
           : [],
@@ -1991,6 +2462,63 @@ export class AutonomyOrchestrator {
       state: "waiting_evidence",
       attemptId: waiting.id,
       detail: "New diagnosis evidence is required before retry",
+    };
+  }
+
+  private failureReceipt(
+    attempt: Attempt,
+    operation: string,
+    result: ProcessResult,
+    gate?: string,
+    source: FailureReceiptSource = "local-process",
+    operationId?: string,
+  ): FailureReceipt {
+    const detail = detailObject(attempt);
+    const issueDigest =
+      this.dependencies.store.getIssue(attempt.issueId)?.digest ?? "missing-issue";
+    return createFailureReceipt(
+      {
+        source,
+        attemptId: attempt.id,
+        operationId: operationId ?? `failure:${attempt.id}:${operation}:${this.id()}`,
+        operation,
+        ...(gate === undefined ? {} : { gate }),
+        issueDigest,
+        ...(typeof detail.diffHash === "string" ? { diffHash: detail.diffHash } : {}),
+        policyHash: this.dependencies.config.policyHash,
+        environmentHash: runtimeEnvironmentHash(),
+        timestamp: this.now(),
+      },
+      result,
+      this.dependencies.config.recoveryPolicy.receipts,
+    );
+  }
+
+  private appendFailureReceipt(attempt: Attempt, receipt: FailureReceipt): JsonValue[] {
+    const existing = Array.isArray(detailObject(attempt).failureReceipts)
+      ? [...(detailObject(attempt).failureReceipts as readonly JsonValue[])]
+      : [];
+    existing.push(jsonValue(receipt));
+    return existing.slice(
+      -this.dependencies.config.recoveryPolicy.receipts.maxReceiptsPerAttempt,
+    );
+  }
+
+  private processEvidence(result: ProcessResult): JsonValue {
+    const limits = this.dependencies.config.recoveryPolicy.receipts;
+    return {
+      exitCode: result.exitCode,
+      signal: result.signal,
+      stdout: redactAndBound(result.stdout, limits.maxStdoutBytes),
+      stderr: redactAndBound(result.stderr, limits.maxStderrBytes),
+      spawnError:
+        result.spawnError === undefined
+          ? null
+          : redactAndBound(result.spawnError, limits.maxSpawnErrorBytes),
+      durationMs: Math.max(0, Math.trunc(result.durationMs)),
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      outputLimitExceeded: result.outputLimitExceeded,
     };
   }
 
@@ -2618,9 +3146,58 @@ export class AutonomyOrchestrator {
       : ["agent-ready"];
   }
 
+  private verifyMachineRecovery(
+    attempt: Attempt,
+    evidence: RecoveryEvidence,
+    authenticationKey: Uint8Array,
+  ): { receipt: FailureReceipt; decision: MachineRecoveryDecision } {
+    assertRecoveryEvidence(
+      evidence,
+      {
+        maxSummaryBytes:
+          this.dependencies.config.recoveryPolicy.machineEvidence.maxSummaryBytes,
+        allowedSources:
+          this.dependencies.config.recoveryPolicy.machineEvidence.allowedSources,
+      },
+      authenticationKey,
+    );
+    const receipt = asRecord(
+      asRecord(detailObject(attempt).lastFailure).receipt,
+    ) as unknown as FailureReceipt;
+    assertFailureReceipt(receipt);
+    const issue = this.dependencies.store.getIssue(attempt.issueId);
+    if (
+      receipt.provenance.attemptId !== attempt.id ||
+      receipt.policyHash !== this.dependencies.config.policyHash ||
+      !issue ||
+      receipt.issueDigest !== issue.digest ||
+      evidence.source !== receipt.source ||
+      evidence.failureFingerprint !== receipt.fingerprint ||
+      evidence.failureReceiptHash !== receipt.hash ||
+      evidence.provenance.producer !== "one-cli-harness" ||
+      evidence.provenance.observedAt !== receipt.timestamp
+    ) {
+      throw new Error("Machine recovery evidence does not match the verified current failure receipt");
+    }
+    const decision = deriveMachineRecoveryDecision(receipt);
+    if (!decision.target) {
+      throw new Error(
+        `Verified ${decision.diagnosis} failure receipt is not eligible for machine retry`,
+      );
+    }
+    return { receipt, decision };
+  }
+
   private assertExecutionScope(attempt: Attempt): void {
     if (this.dependencies.executionScope === "roadmap-only") {
       requireRoadmapScopeBinding(attempt, this.expectedRoadmapBinding());
+      return;
+    }
+    if (this.dependencies.expectedRoadmapBinding !== undefined) {
+      throw new Error("Normal execution cannot carry a roadmap binding");
+    }
+    if (Object.keys(asRecord(detailObject(attempt).roadmapScopeBinding)).length > 0) {
+      throw new Error("Normal execution cannot mutate a roadmap-bound attempt");
     }
   }
 
@@ -2665,6 +3242,22 @@ function failureResumeState(attempt: Attempt, operation: string): Attempt["state
   if (operation === "github-checks") return "waiting_ci";
   if (operation === "post-merge-smoke") return "post_merge";
   return attempt.state === "waiting" ? "planning" : attempt.state;
+}
+
+function recoveryResumeState(attempt: Attempt): Attempt["state"] {
+  const resume = detailObject(attempt).resumeState;
+  return typeof resume === "string" &&
+    [
+      "planning",
+      "implementing",
+      "verifying",
+      "pr_open",
+      "waiting_ci",
+      "merging",
+      "post_merge",
+    ].includes(resume)
+    ? (resume as Attempt["state"])
+    : "planning";
 }
 
 function requiresTargetedDogfood(paths: readonly string[]): boolean {
@@ -2753,6 +3346,19 @@ function processSucceeded(result: ProcessResult): boolean {
     !result.cancelled &&
     !result.outputLimitExceeded
   );
+}
+
+function syntheticProcessResult(exitCode: number | null, stderr: string): ProcessResult {
+  return {
+    exitCode,
+    signal: null,
+    stdout: "",
+    stderr,
+    durationMs: 0,
+    timedOut: false,
+    cancelled: false,
+    outputLimitExceeded: false,
+  };
 }
 
 function isTransient(message: string): boolean {

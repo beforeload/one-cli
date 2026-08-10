@@ -2,6 +2,7 @@ import path from "node:path";
 import type { ProcessRunner, ProcessResult } from "./runner.js";
 import { requireSuccess } from "./runner.js";
 import type { HarnessRelease } from "./release.js";
+import type { FailureReceiptView } from "./diagnosis.js";
 
 export interface AttemptStatus {
   id: string;
@@ -25,6 +26,33 @@ export interface TickOutput {
   state: string;
   attemptId?: string;
   detail?: string;
+}
+
+export interface RecoveryEvidence {
+  schema: "autonomy.one-cli/recovery-evidence-v1";
+  source: FailureReceiptView["source"];
+  provenance: {
+    producer: string;
+    operationId: string;
+    observedAt: number;
+  };
+  failureFingerprint: string;
+  failureReceiptHash: string;
+  summary: string;
+  hash: string;
+  authentication: {
+    algorithm: "hmac-sha256";
+    keyId: string;
+    mac: string;
+  };
+}
+
+export interface FailureGateProbeOutput {
+  schema: "autonomy.one-cli/failure-gate-probe-v1";
+  attemptId: string;
+  gate: string;
+  recovered: boolean;
+  receipt: FailureReceiptView;
 }
 
 export interface ExpectedRoadmapBinding {
@@ -133,10 +161,72 @@ export class OneCliClient {
     return tick;
   }
 
+  async probeFailureGate(
+    attemptId: string,
+    operationId: string,
+    scope: "normal" | "roadmap-only",
+    expected?: ExpectedRoadmapBinding,
+    signal?: AbortSignal,
+  ): Promise<FailureGateProbeOutput> {
+    const result = await this.invoke(
+      [
+        "recover",
+        "probe",
+        attemptId,
+        "--operation-id",
+        operationId,
+        "--mode",
+        "auto-merge",
+        "--output",
+        "json",
+        ...scopeArgs(scope, expected),
+      ],
+      signal,
+    );
+    return parseFailureGateProbe(parseJson(result.stdout, "recover probe"));
+  }
+
+  async machineRetry(
+    attemptId: string,
+    evidence: RecoveryEvidence,
+    scope: "normal" | "roadmap-only",
+    expected?: ExpectedRoadmapBinding,
+    signal?: AbortSignal,
+  ): Promise<TickOutput> {
+    const result = await this.invoke(
+      [
+        "recover",
+        "retry",
+        attemptId,
+        "--machine-evidence",
+        "-",
+        "--operation-id",
+        evidence.provenance.operationId,
+        "--mode",
+        "auto-merge",
+        "--output",
+        "json",
+        ...scopeArgs(scope, expected),
+      ],
+      signal,
+      false,
+      JSON.stringify(evidence),
+    );
+    const tick = parseTick(parseJson(result.stdout, "recover retry"));
+    if (
+      result.exitCode !== 0 &&
+      !["in_doubt", "blocked", "failed"].includes(tick.state)
+    ) {
+      requireSuccess("one-cli autonomy recover retry", result);
+    }
+    return tick;
+  }
+
   private async invoke(
     args: readonly string[],
     signal?: AbortSignal,
     assert = true,
+    stdin?: string,
   ): Promise<ProcessResult> {
     const release = this.resolveRelease();
     const result = await this.runner.run({
@@ -152,6 +242,7 @@ export class OneCliClient {
       env: this.environment,
       timeoutMs: 30 * 60_000,
       maxOutputBytes: 8 * 1024 * 1024,
+      ...(stdin === undefined ? {} : { stdin }),
       ...(signal ? { signal } : {}),
     });
     return assert ? requireSuccess(`one-cli autonomy ${args[0] ?? ""}`, result) : result;
@@ -166,6 +257,50 @@ export class OneCliClient {
         }
       : this.releaseResolver();
   }
+}
+
+function parseFailureGateProbe(value: unknown): FailureGateProbeOutput {
+  const object = record(value, "failure gate probe");
+  if (
+    object.schema !== "autonomy.one-cli/failure-gate-probe-v1" ||
+    typeof object.attemptId !== "string" ||
+    typeof object.gate !== "string" ||
+    typeof object.recovered !== "boolean"
+  ) {
+    throw new Error("one-cli failure gate probe schema is invalid");
+  }
+  return {
+    schema: object.schema,
+    attemptId: object.attemptId,
+    gate: object.gate,
+    recovered: object.recovered,
+    receipt: parseFailureReceipt(object.receipt),
+  };
+}
+
+function parseFailureReceipt(value: unknown): FailureReceiptView {
+  const object = record(value, "failure receipt");
+  const source = object.source;
+  if (
+    object.schema !== "autonomy.one-cli/failure-receipt-v1" ||
+    !["local-process", "worker", "github-check", "reconciler"].includes(String(source)) ||
+    typeof object.operation !== "string" ||
+    (object.gate !== null && typeof object.gate !== "string") ||
+    (object.exitCode !== null && typeof object.exitCode !== "number") ||
+    (object.signal !== null && typeof object.signal !== "string") ||
+    typeof object.stdout !== "string" ||
+    typeof object.stderr !== "string" ||
+    (object.spawnError !== null && typeof object.spawnError !== "string") ||
+    typeof object.timedOut !== "boolean" ||
+    typeof object.cancelled !== "boolean" ||
+    typeof object.outputLimitExceeded !== "boolean" ||
+    typeof object.timestamp !== "number" ||
+    typeof object.fingerprint !== "string" ||
+    typeof object.hash !== "string"
+  ) {
+    throw new Error("one-cli failure receipt is invalid");
+  }
+  return object as unknown as FailureReceiptView;
 }
 
 export function parseAutonomyStatus(value: unknown): AutonomyStatus {

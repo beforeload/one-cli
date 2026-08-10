@@ -1,0 +1,23 @@
+schema: autonomy.one-cli/recovery-policy-v1
+
+receipts:
+  maxStdoutBytes: 8192
+  maxStderrBytes: 8192
+  maxSpawnErrorBytes: 1024
+  maxReceiptsPerAttempt: 20
+  redaction: strict
+
+machineEvidence:
+  maxSummaryBytes: 4096
+  allowedSources:
+    - local-process
+    - worker
+    - github-check
+    - reconciler
+  requireOperationId: true
+  requireFailureFingerprint: true
+  deduplicateByHash: true
+
+manualBreakGlass:
+  maxEvidenceBytes: 4096
+  requireNovelEvidence: true

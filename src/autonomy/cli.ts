@@ -10,7 +10,13 @@ import {
   type AutonomyConfig,
   type AutonomyMode,
 } from "./config.js";
-import type { ApprovalBinding, Attempt, JsonValue, LeaseGrant } from "./domain.js";
+import type {
+  ApprovalBinding,
+  Attempt,
+  JsonValue,
+  LeaseGrant,
+  RecoveryEvidence,
+} from "./domain.js";
 import { GitManager } from "./git.js";
 import {
   GhRestTransport,
@@ -29,7 +35,10 @@ import {
   ProviderFindingNormalizer,
   ProviderIssueNormalizer,
 } from "./maintenance.js";
-import { AutonomyOrchestrator } from "./orchestrator.js";
+import {
+  AutonomyOrchestrator,
+  type MachineRecoveryTarget,
+} from "./orchestrator.js";
 import type { ExpectedRoadmapBinding } from "./roadmap-enforcement.js";
 import {
   SpawnProcessRunner,
@@ -66,6 +75,7 @@ const COMMANDS = new Set([
   "supervise",
   "schedule",
   "intake",
+  "recover",
 ]);
 
 export async function dispatchAutonomyCli(argv: readonly string[]): Promise<number | undefined> {
@@ -91,6 +101,10 @@ interface CliOptions {
   apply: boolean;
   intervalMs?: number;
   evidence?: string;
+  machineEvidence?: string;
+  operationId?: string;
+  recoveryTarget?: MachineRecoveryTarget | "same-state";
+  diagnosis?: string;
   action?: string;
   attemptId?: string;
   executionScope: "normal" | "roadmap-only";
@@ -157,6 +171,8 @@ async function runCommand(command: string, argv: readonly string[]): Promise<num
         return decideApproval(command, options, config, store);
       case "retry":
         return await retry(options, config, store);
+      case "recover":
+        return await recoverCommand(options, config, store);
       case "cancel":
         return await cancel(options, config, store);
       case "resolve-in-doubt":
@@ -334,10 +350,75 @@ async function retry(
     store,
     options.executionScope,
     roadmapBinding(options),
-  ).retryAttempt(
+  ).breakGlassRetryAttempt(
     attempt.id,
     evidence,
     new AbortController().signal,
+  );
+  output(options, result);
+  return result.state === "in_doubt" ? 1 : 0;
+}
+
+async function recoverCommand(
+  options: CliOptions,
+  config: AutonomyConfig,
+  store: AutonomyStore,
+): Promise<number> {
+  const [operation, attemptId, extra] = options.positionals;
+  if (!operation || !attemptId || extra !== undefined) {
+    throw new Error("recover requires probe|retry <attempt-id>");
+  }
+  if (
+    options.apply ||
+    options.evidence !== undefined ||
+    options.action !== undefined ||
+    options.attemptId !== undefined ||
+    options.intervalMs !== undefined
+  ) {
+    throw new Error("recover received an option that is not valid for machine recovery");
+  }
+  if (!options.operationId) throw new Error("recover requires --operation-id");
+  const recoveryKey = readHostRecoveryKey(config);
+  const orchestrator = orchestratorRuntime(
+    config,
+    store,
+    options.executionScope,
+    roadmapBinding(options),
+  );
+  if (operation === "probe") {
+    if (
+      options.machineEvidence !== undefined ||
+      options.recoveryTarget !== undefined ||
+      options.diagnosis !== undefined
+    ) {
+      throw new Error("recover probe accepts only its attempt and operation ID");
+    }
+    output(
+      options,
+      await orchestrator.probeAttemptFailureGate(
+        attemptId,
+        options.operationId,
+        new AbortController().signal,
+      ),
+    );
+    return 0;
+  }
+  if (operation !== "retry") throw new Error("recover requires probe or retry");
+  if (!options.machineEvidence) {
+    throw new Error("recover retry requires --machine-evidence <file|->");
+  }
+  if (options.recoveryTarget !== undefined || options.diagnosis !== undefined) {
+    throw new Error("recover retry derives target and diagnosis from verified host evidence");
+  }
+  const evidence = await readMachineRecoveryEvidence(config, options.machineEvidence);
+  if (evidence.provenance.operationId !== options.operationId) {
+    throw new Error("Machine evidence operation ID does not match --operation-id");
+  }
+  const result = await orchestrator.retryAttemptWithMachineEvidence(
+    attemptId,
+    evidence,
+    new AbortController().signal,
+    { authenticationKey: recoveryKey },
   );
   output(options, result);
   return result.state === "in_doubt" ? 1 : 0;
@@ -963,6 +1044,10 @@ function parseOptions(argv: readonly string[]): CliOptions {
   let apply = false;
   let intervalMs: number | undefined;
   let evidence: string | undefined;
+  let machineEvidence: string | undefined;
+  let operationId: string | undefined;
+  let recoveryTarget: MachineRecoveryTarget | "same-state" | undefined;
+  let diagnosis: string | undefined;
   let action: string | undefined;
   let attemptId: string | undefined;
   let executionScope: CliOptions["executionScope"] = "normal";
@@ -990,6 +1075,32 @@ function parseOptions(argv: readonly string[]): CliOptions {
       intervalMs = candidate;
     } else if (value === "--evidence") {
       evidence = requiredValue(argv, ++index, value);
+    } else if (value === "--machine-evidence") {
+      machineEvidence = requiredValue(argv, ++index, value);
+    } else if (value === "--operation-id") {
+      operationId = requiredValue(argv, ++index, value);
+      if (Buffer.byteLength(operationId) > 512 || /[\0\r\n]/u.test(operationId)) {
+        throw new Error("--operation-id is invalid");
+      }
+    } else if (value === "--target") {
+      const target = requiredValue(argv, ++index, value);
+      if (target !== "same-state" && target !== "implementing" && target !== "verifying") {
+        throw new Error("--target must be same-state, implementing, or verifying");
+      }
+      recoveryTarget = target;
+    } else if (value === "--diagnosis") {
+      diagnosis = requiredValue(argv, ++index, value);
+      if (
+        ![
+          "transient/network/provider",
+          "environment/toolchain",
+          "code/gate",
+          "policy/governance",
+          "unknown",
+        ].includes(diagnosis)
+      ) {
+        throw new Error("--diagnosis is invalid");
+      }
     } else if (value === "--action") {
       action = requiredValue(argv, ++index, value);
       if (action !== "promote-release") throw new Error("Unsupported --action");
@@ -1016,6 +1127,10 @@ function parseOptions(argv: readonly string[]): CliOptions {
     ...(mode === undefined ? {} : { mode }),
     ...(intervalMs === undefined ? {} : { intervalMs }),
     ...(evidence === undefined ? {} : { evidence }),
+    ...(machineEvidence === undefined ? {} : { machineEvidence }),
+    ...(operationId === undefined ? {} : { operationId }),
+    ...(recoveryTarget === undefined ? {} : { recoveryTarget }),
+    ...(diagnosis === undefined ? {} : { diagnosis }),
     ...(action === undefined ? {} : { action }),
     ...(attemptId === undefined ? {} : { attemptId }),
     ...(expectedRoadmapIssue === undefined ? {} : { expectedRoadmapIssue }),
@@ -1136,13 +1251,17 @@ Subcommands:
   intake promote-user <issue> <fields-json-file>
   intake promote-community <finding-json-file> <fields-json-file>
   intake promote-self <finding-json-file> <fields-json-file>
+  recover probe <attempt-id> --operation-id <id>
+  recover retry <attempt-id> --machine-evidence <file|-> --operation-id <id>
 
 Options:
   --workspace <dir>  Repository root
   --mode <mode>      observe|propose|auto-pr|auto-merge (bounded by trusted maximum)
   --output <format>  text|json|jsonl
   --interval-ms <n>  Daemon/supervisor interval (minimum 1000)
-  --evidence <text|file>  New bounded diagnosis evidence for retry
+  --evidence <text|file>  Manual break-glass diagnosis evidence for retry
+  --machine-evidence <file|->  Canonical bounded recovery evidence under ONE_CLI_HOME or stdin
+  --operation-id <id>  Machine recovery idempotency operation ID
   --attempt <id>     Attempt binding for release stage
   --action promote-release  Record a release-promotion approval
   --roadmap-only      Execute only agent-ready cold-start roadmap issues
@@ -1177,6 +1296,104 @@ function readEvidence(workspace: string, value: string): string {
     throw new Error("Evidence file must be a bounded regular workspace file");
   }
   return fs.readFileSync(candidate, "utf8");
+}
+
+async function readMachineRecoveryEvidence(
+  config: AutonomyConfig,
+  value: string,
+): Promise<RecoveryEvidence> {
+  const maximumBytes = 64 * 1024;
+  let bytes: Buffer;
+  if (value === "-") {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of process.stdin) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.byteLength;
+      if (total > maximumBytes) throw new Error("Machine evidence stdin exceeds its byte bound");
+      chunks.push(buffer);
+    }
+    bytes = Buffer.concat(chunks);
+  } else {
+    if (value.includes("\0")) throw new Error("Machine evidence file path is invalid");
+    const oneCliHome = path.resolve(config.stateRoot, "..", "..");
+    const root = fs.realpathSync(oneCliHome);
+    const unresolved = path.resolve(root, value);
+    assertWithin(root, unresolved, "Machine evidence file");
+    const before = fs.lstatSync(unresolved);
+    if (before.isSymbolicLink() || !before.isFile() || before.size > maximumBytes) {
+      throw new Error("Machine evidence must be a bounded regular file under ONE_CLI_HOME");
+    }
+    const canonical = fs.realpathSync(unresolved);
+    assertWithin(root, canonical, "Machine evidence file");
+    const descriptor = fs.openSync(canonical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const opened = fs.fstatSync(descriptor);
+      if (
+        !opened.isFile() ||
+        opened.dev !== before.dev ||
+        opened.ino !== before.ino ||
+        opened.size > maximumBytes
+      ) {
+        throw new Error("Machine evidence changed while being opened");
+      }
+      bytes = fs.readFileSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+  const source = bytes.toString("utf8").trim();
+  if (!source) throw new Error("Machine evidence JSON is empty");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source) as unknown;
+  } catch (error) {
+    throw new Error("Machine evidence JSON is malformed", { cause: error });
+  }
+  if (JSON.stringify(parsed) !== source) {
+    throw new Error("Machine evidence JSON must use canonical compact serialization");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Machine evidence JSON must be an object");
+  }
+  return parsed as RecoveryEvidence;
+}
+
+function readHostRecoveryKey(config: AutonomyConfig): Buffer {
+  const oneCliHome = path.resolve(config.stateRoot, "..", "..");
+  const expected = path.join(oneCliHome, "harness", "recovery.key");
+  let descriptor: number | undefined;
+  try {
+    const before = fs.lstatSync(expected);
+    if (
+      before.isSymbolicLink() ||
+      !before.isFile() ||
+      before.size !== 32 ||
+      (before.mode & 0o777) !== 0o600 ||
+      fs.realpathSync(expected) !== expected
+    ) {
+      throw new Error("Host recovery key must be a canonical 0600 regular 32-byte file");
+    }
+    descriptor = fs.openSync(expected, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const opened = fs.fstatSync(descriptor);
+    if (
+      !opened.isFile() ||
+      opened.size !== 32 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      (opened.mode & 0o777) !== 0o600
+    ) {
+      throw new Error("Host recovery key changed while being opened");
+    }
+    return fs.readFileSync(descriptor);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw new Error("Host recovery key is missing; machine recovery fails closed");
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
 }
 
 function selectedReleaseAttempt(options: CliOptions, store: AutonomyStore): Attempt {

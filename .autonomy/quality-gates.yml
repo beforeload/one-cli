@@ -49,6 +49,14 @@ governance:
     - .github/workflows/**
     - .github/CODEOWNERS
     - harness/**
+    - .npmrc
+    - package.json
+    - package-lock.json
+    - scripts/independent-verifier.mjs
+    - scripts/validate-autonomy.mjs
+    - scripts/validate-harness.mjs
+    - tsconfig.json
+    - tsconfig.build.json
     - src/autonomy/roadmap-enforcement.ts
   executionAuthor: beforeload
   developmentAuthorMayOpenProposalIssueOnly: true
