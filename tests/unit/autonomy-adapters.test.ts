@@ -387,12 +387,38 @@ describe("portable autonomy adapters", () => {
     const profile = request?.args[1];
     expect(profile).toContain("(deny default)");
     expect(profile).toContain("(deny network*)");
+    expect(profile).toContain('(allow file-read-data (literal "/"))');
+    expect(profile).toContain(
+      `(allow file-read-metadata (literal ${JSON.stringify(path.dirname(fs.realpathSync(workspace)))})`,
+    );
     expect(profile).toContain(`(subpath ${JSON.stringify(fs.realpathSync(workspace))})`);
+    expect(profile).not.toContain("(allow file-read*)");
     expect(profile).not.toContain("(allow network");
     expect(request?.args.slice(2)).toEqual([fs.realpathSync("/bin/echo"), "fixed;not-shell"]);
     expect(request?.timeoutMs).toBe(1_234);
     expect(request?.maxOutputBytes).toBe(4_321);
     expect(request?.env?.HOME).not.toBe(process.env.HOME);
+  });
+
+  it("allows Node to traverse only runtime path ancestors on Darwin", async () => {
+    if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) return;
+    const workspace = path.join(root, "node-runtime-workspace");
+    fs.mkdirSync(workspace);
+    const sandbox = new DarwinSandbox({
+      workspace,
+      commands: {
+        node: {
+          executable: fs.realpathSync(process.execPath),
+          args: ["--version"],
+        },
+      },
+    });
+
+    const result = await sandbox.run("node");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.signal).toBeNull();
+    expect(result.stdout).toMatch(/^v\d+\.\d+\.\d+/u);
   });
 
   it("escapes paths embedded in sandbox profiles", () => {
