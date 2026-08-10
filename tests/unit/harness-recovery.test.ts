@@ -33,6 +33,14 @@ describe("harness machine recovery", () => {
       .toBe("transient/network/provider");
     expect(diagnoseFailure(receipt({ spawnError: "ENOENT", exitCode: 127 })).category)
       .toBe("environment/toolchain");
+    expect(diagnoseFailure(receipt({
+      operation: "gate:install",
+      stderr: "npm error Exit handler never called! This is an error with npm itself.",
+    }))).toMatchObject({
+      category: "environment/toolchain",
+      decision: "retry-same-state",
+      target: "verifying",
+    });
     expect(diagnoseFailure(receipt({ operation: "gate:test", gate: "test" })).decision)
       .toBe("retry-implement");
     expect(diagnoseFailure(receipt({ stderr: "protected path requires approval" }), {

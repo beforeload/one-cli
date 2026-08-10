@@ -44,7 +44,7 @@ const POLICY =
 const TRANSIENT =
   /\b(?:econnreset|econnrefused|enetunreach|eai_again|dns|network|socket hang up|timed? ?out|timeout|temporary|temporarily|rate limit|too many requests|http 429|http 5\d\d|provider unavailable|service unavailable)\b/iu;
 const ENVIRONMENT =
-  /\b(?:command not found|enoent|not installed|missing executable|cannot find module|module not found|unsupported platform|toolchain|sandbox unavailable|no such file or directory)\b/iu;
+  /\b(?:command not found|enoent|not installed|missing executable|cannot find module|module not found|unsupported platform|toolchain|sandbox unavailable|no such file or directory|exit handler never called|error with npm itself|error writing to the directory)\b/iu;
 
 export function diagnoseFailure(
   receipt: FailureReceiptView,
