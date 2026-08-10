@@ -39,6 +39,7 @@ export interface DarwinSandboxOptions {
   maxOutputBytes?: number;
   isExecutable?: (candidate: string) => boolean;
   runtimeRoots?: readonly string[];
+  networkProxy?: string;
 }
 
 interface PreparedCommand {
@@ -63,6 +64,7 @@ export class DarwinSandbox implements SandboxPort {
   private readonly maxOutputBytes: number;
   private readonly isExecutable: (candidate: string) => boolean;
   private readonly runtimeRoots: readonly string[];
+  private readonly networkProxy: string | undefined;
 
   constructor(options: DarwinSandboxOptions) {
     if (!path.isAbsolute(options.workspace)) throw new Error("Sandbox workspace must be absolute");
@@ -91,6 +93,7 @@ export class DarwinSandbox implements SandboxPort {
     this.runtimeRoots = (options.runtimeRoots ?? defaultRuntimeRoots())
       .filter((root) => fs.existsSync(root))
       .map((root) => fs.realpathSync(root));
+    this.networkProxy = checkedLoopbackProxy(options.networkProxy);
 
     for (const [name, command] of Object.entries(options.commands)) {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(name)) {
@@ -155,7 +158,11 @@ export class DarwinSandbox implements SandboxPort {
       executable: this.sandboxExecutable,
       args: ["-p", profile, command.executable, ...command.args],
       cwd: command.cwd,
-      env: sandboxEnvironment(temporaryHome, temporaryDirectory),
+      env: sandboxEnvironment(
+        temporaryHome,
+        temporaryDirectory,
+        command.network ? this.networkProxy : undefined,
+      ),
       timeoutMs: this.timeoutMs,
       maxOutputBytes: this.maxOutputBytes,
       ...(signal === undefined ? {} : { signal }),
@@ -260,6 +267,7 @@ function profileString(value: string): string {
 function sandboxEnvironment(
   temporaryHome: string,
   temporaryDirectory: string,
+  networkProxy?: string,
 ): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {
     HOME: temporaryHome,
@@ -268,7 +276,38 @@ function sandboxEnvironment(
   };
   const pathValue = process.env.PATH;
   if (pathValue !== undefined) environment.PATH = pathValue;
+  if (networkProxy !== undefined) {
+    environment.HTTP_PROXY = networkProxy;
+    environment.HTTPS_PROXY = networkProxy;
+    environment.NO_PROXY = "127.0.0.1,localhost";
+  }
   return environment;
+}
+
+function checkedLoopbackProxy(value: string | undefined): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Sandbox network proxy must be a valid URL");
+  }
+  const port = Number(parsed.port);
+  if (
+    parsed.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) ||
+    !Number.isSafeInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error("Sandbox network proxy must be credential-free loopback HTTP with an explicit port");
+  }
+  return parsed.toString();
 }
 
 function isWithin(root: string, candidate: string): boolean {

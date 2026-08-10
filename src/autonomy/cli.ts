@@ -1029,7 +1029,13 @@ function sandboxFor(config: AutonomyConfig, worktreePath: string): DarwinSandbox
       network: command.network,
     };
   }
-  return new DarwinSandbox({ workspace: worktreePath, commands });
+  return new DarwinSandbox({
+    workspace: worktreePath,
+    commands,
+    ...(process.env.ONE_CLI_SANDBOX_PROXY === undefined
+      ? {}
+      : { networkProxy: process.env.ONE_CLI_SANDBOX_PROXY }),
+  });
 }
 
 function selectedAttempt(options: CliOptions, store: AutonomyStore): Attempt {
