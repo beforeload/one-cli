@@ -47,6 +47,7 @@ describe("self-hosted verifier runner bootstrap", () => {
     expect(script).toContain("--connect-timeout 15 --max-time 300");
     expect(script).toContain("--retry 3 --retry-all-errors");
     expect(script).toContain("--proto '=https' --tlsv1.2");
+    expect(script).toContain('mktemp "$ONE_CLI_HOME/.runner.XXXXXX"');
     expect(script).toContain("shasum -a 256 --check");
     expect(script).toContain('--url "$REPOSITORY_URL"');
     expect(script).toContain('REPOSITORY_URL="https://github.com/beforeload/one-cli"');

@@ -68,7 +68,7 @@ if [[ -e "$RUNNER_HOME" ]]; then
   echo "Runner home already exists; refusing to replace it: $RUNNER_HOME" >&2
   exit 1
 fi
-archive="$(mktemp "$ONE_CLI_HOME/.runner.XXXXXX.tar.gz")"
+archive="$(mktemp "$ONE_CLI_HOME/.runner.XXXXXX")"
 cleanup() {
   rm -f "$archive"
   unset ONE_CLI_RUNNER_REGISTRATION_TOKEN
