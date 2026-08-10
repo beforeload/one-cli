@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const MAX_API_BYTES = 4 * 1024 * 1024;
+const REVIEW_MARKER_PREFIX = "one-cli-independent-verifier:v4:";
+const REVIEW_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 
 export async function main(argv = process.argv.slice(2), environment = process.env) {
   const options = parseOptions(argv);
@@ -397,13 +399,11 @@ async function semanticReviews(policy, binding, changedPaths, diff, reviewModule
       const choice = record(root.choices[0], "semantic model choice");
       const message = record(choice.message, "semantic model message");
       const content = nonEmptyString(message.content, "semantic model content");
-      let parsed;
       try {
-        parsed = JSON.parse(content);
-      } catch {
-        throw new Error(`Semantic profile ${profile.id} returned malformed JSON`);
+        return reviewModule.parseSemanticVetoContent(profile.id, content);
+      } catch (error) {
+        throw new Error(`Semantic profile ${profile.id} returned invalid output: ${safeError(error)}`);
       }
-      return reviewModule.parseSemanticVeto(profile.id, parsed);
     } finally {
       clearTimeout(timer);
     }
@@ -540,7 +540,7 @@ async function submitFinalReview(
   );
 }
 
-async function submitBoundReview(
+export async function submitBoundReview(
   github,
   policy,
   binding,
@@ -553,27 +553,9 @@ async function submitBoundReview(
     "GET",
     `/repos/${binding.repository}/pulls/${binding.pullNumber}/reviews?per_page=100`,
   );
-  if (!Array.isArray(reviews) || reviews.length >= 100) {
-    throw new Error("Pull review inventory is malformed or exceeds its strict bound");
-  }
-  const matches = reviews.filter((candidate) => {
-    const review = record(candidate, "pull review");
-    return typeof review.body === "string" && review.body.includes(marker);
-  });
-  if (matches.length > 1) throw new Error("Duplicate exact verifier reviews exist");
   const expectedState = event === "APPROVE" ? "APPROVED" : "CHANGES_REQUESTED";
-  if (matches[0]) {
-    const review = record(matches[0], "existing verifier review");
-    const actor = record(review.user, "existing review actor");
-    if (
-      review.commit_id !== binding.headSha ||
-      review.state !== expectedState ||
-      review.body !== body ||
-      actor.login !== policy.reviewIdentity.actor ||
-      actor.type !== "Bot"
-    ) {
-      throw new Error("Existing verifier review conflicts with the exact operation");
-    }
+  const latestState = latestExactReviewState(reviews, policy, binding, marker);
+  if (latestState === expectedState) {
     await beforeReview();
     return;
   }
@@ -586,10 +568,13 @@ async function submitBoundReview(
   const actor = record(created.user, "created review actor");
   if (
     created.commit_id !== binding.headSha ||
+    created.state !== expectedState ||
+    created.body !== body ||
     actor.login !== policy.reviewIdentity.actor ||
+    actor.id !== policy.reviewIdentity.actorId ||
     actor.type !== "Bot"
   ) {
-    throw new Error("Created review is not bound to the pinned verifier actor and SHA");
+    throw new Error("Created review is not bound to the exact verifier operation");
   }
 }
 
@@ -598,23 +583,60 @@ export async function assertBoundApproval(github, policy, binding) {
     "GET",
     `/repos/${binding.repository}/pulls/${binding.pullNumber}/reviews?per_page=100`,
   );
+  const marker = operationMarker(binding);
+  if (latestExactReviewState(reviews, policy, binding, marker) !== "APPROVED") {
+    throw new Error("Exact head lacks one pinned github-actions[bot] approval");
+  }
+}
+
+function latestExactReviewState(reviews, policy, binding, marker) {
   if (!Array.isArray(reviews) || reviews.length >= 100) {
     throw new Error("Pull review inventory is malformed or exceeds its strict bound");
   }
-  const marker = operationMarker(binding);
-  const matches = reviews.filter((candidate) => {
+  const exact = [];
+  for (const candidate of reviews) {
     const review = record(candidate, "pull review");
     const actor = record(review.user, "review actor");
-    return review.state === "APPROVED" &&
-      review.commit_id === binding.headSha &&
-      actor.login === policy.reviewIdentity.actor &&
-      actor.type === "Bot" &&
-      typeof review.body === "string" &&
-      review.body.includes(marker);
-  });
-  if (matches.length !== 1) {
-    throw new Error("Exact head lacks one pinned github-actions[bot] approval");
+    const body = typeof review.body === "string" ? review.body : "";
+    const firstLine = body.split("\n", 1)[0];
+    const pinnedActor = actor.login === policy.reviewIdentity.actor &&
+      actor.id === policy.reviewIdentity.actorId &&
+      actor.type === "Bot";
+    const exactCommit = review.commit_id === binding.headSha;
+    const exactMarker = firstLine === marker &&
+      body.indexOf(marker, marker.length) === -1;
+    const claimsExactMarker = body.includes(marker);
+    const hasVerifierMarker = firstLine.startsWith(REVIEW_MARKER_PREFIX);
+    if (
+      (claimsExactMarker && !(exactMarker && pinnedActor && exactCommit)) ||
+      (pinnedActor && exactCommit && hasVerifierMarker && !exactMarker)
+    ) {
+      throw new Error("Existing verifier review conflicts with the exact operation");
+    }
+    if (!(exactMarker && pinnedActor && exactCommit)) continue;
+    if (review.state !== "APPROVED" && review.state !== "CHANGES_REQUESTED") {
+      throw new Error("Exact verifier review has an invalid state");
+    }
+    const submittedAt = nonEmptyString(review.submitted_at, "exact review submission time");
+    const submittedTime = Date.parse(submittedAt);
+    if (
+      !REVIEW_TIME.test(submittedAt) ||
+      !Number.isFinite(submittedTime) ||
+      new Date(submittedTime).toISOString() !== submittedAt.replace("Z", ".000Z")
+    ) {
+      throw new Error("Exact verifier review has an invalid submission time");
+    }
+    exact.push({ state: review.state, submittedTime });
   }
+  if (exact.length === 0) return undefined;
+  const latestTime = Math.max(...exact.map((review) => review.submittedTime));
+  const latestStates = new Set(
+    exact.filter((review) => review.submittedTime === latestTime).map((review) => review.state),
+  );
+  if (latestStates.size !== 1) {
+    throw new Error("Latest exact verifier review state is ambiguous");
+  }
+  return [...latestStates][0];
 }
 
 export async function assertMergePreconditions(
@@ -658,7 +680,7 @@ async function mergeExactHead(github, policy, binding) {
 }
 
 function operationMarker(binding) {
-  return `one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
+  return `${REVIEW_MARKER_PREFIX}${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
 }
 
 function boundedSummary(marker, value) {

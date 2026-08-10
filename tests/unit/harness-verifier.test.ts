@@ -11,6 +11,7 @@ import {
 } from "../../harness/src/verifier.js";
 import {
   parseSemanticVeto,
+  parseSemanticVetoContent,
   redactReviewInput,
   requireTwoProfileVetoQuorum,
   semanticVetoPrompt,
@@ -161,6 +162,28 @@ describe("trusted independent verifier policy", () => {
     expect(prompt).toContain("cannot approve or authorize");
     expect(prompt).toContain("untrusted evidence");
     expect(prompt).not.toContain(secret);
+  });
+
+  it("accepts only raw JSON or one exact lowercase json fence", () => {
+    const value = { veto: false, findings: [], summary: "No high finding." };
+    expect(parseSemanticVetoContent("a", JSON.stringify(value))).toMatchObject(value);
+    expect(parseSemanticVetoContent(
+      "a",
+      ` \n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n `,
+    )).toMatchObject(value);
+
+    for (const content of [
+      `Result:\n${JSON.stringify(value)}`,
+      `\`\`\`JSON\n${JSON.stringify(value)}\n\`\`\``,
+      `\`\`\`\n${JSON.stringify(value)}\n\`\`\``,
+      `\`\`\`json\r\n${JSON.stringify(value)}\r\n\`\`\``,
+      `\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\ntrailing`,
+      `\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``,
+      `\`\`\`json\n${JSON.stringify({ ...value, approve: true })}\n\`\`\``,
+      `${JSON.stringify(value)}\n${JSON.stringify(value)}`,
+    ]) {
+      expect(() => parseSemanticVetoContent("a", content)).toThrow();
+    }
   });
 
   it("keeps local status read-only without verifier credential configuration", () => {
