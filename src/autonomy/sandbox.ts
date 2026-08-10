@@ -139,7 +139,9 @@ export class DarwinSandbox implements SandboxPort {
       throw new Error(`Sandbox command is not preconfigured: ${commandName}`);
     }
 
-    const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), "one-cli-sandbox-"));
+    const temporaryHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "one-cli-sandbox-")),
+    );
     const temporaryDirectory = path.join(temporaryHome, "tmp");
     fs.mkdirSync(temporaryDirectory, { mode: 0o700 });
     const profile = buildDarwinSandboxProfile(
