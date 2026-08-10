@@ -144,6 +144,15 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         ? policy.workflow.policyVersion
         : content.error ?? "Pinned workflow does not declare the expected verifier policy version",
     );
+    const policyHashMarker = `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`;
+    const workflowPolicyHashOk = workflowBlobOk && decodedWorkflow.includes(policyHashMarker);
+    add(
+      "workflow-policy-hash",
+      workflowPolicyHashOk,
+      workflowPolicyHashOk
+        ? policy.workflow.policyHash
+        : content.error ?? "Pinned workflow does not declare the expected verifier policy hash",
+    );
 
     const actionsWorkflow = resultRecord(
       actionsWorkflowResult,

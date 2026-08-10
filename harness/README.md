@@ -119,6 +119,10 @@ accepted fallback.
 
 The independent verifier has no local key, custom App, or repository secret.
 GitHub Actions supplies an ephemeral `GITHUB_TOKEN` as the built-in App identity.
+The Actions verifier never calls `/installation`, branch-protection, ruleset, or
+Actions-permission APIs. It requires `GITHUB_ACTIONS=true`, the exact
+`GITHUB_REPOSITORY` and event repository, and validates `/user` as
+`github-actions[bot]` user ID `41898282` when that endpoint is available.
 The local builder GitHub identity must remain least privilege and must not have
 checks, review, administration-write, ruleset-write, or branch-protection-write
 authority.
@@ -138,10 +142,13 @@ file or command from `untrusted/` is executed. The required first job is named
 `harness/verifier-policy.yml` pins the base repository, default branch, trusted
 workflow path, Git blob SHA and policy version, required `verify` check name and
 GitHub Actions App ID `15368`, emitted check name and App ID, review actor
-`github-actions[bot]`, protected paths, bounds, merge method, and exactly two
-semantic profiles. The workflow emits `one-cli/independent-verifier` for every
-PR. Normal paths become deterministically eligible only after the exact head's
-pinned `verify` check succeeds.
+`github-actions[bot]` with user ID `41898282`, protected paths, bounds, merge
+method, and exactly two semantic profiles. The policy pins the trusted workflow
+blob, while that workflow pins the canonical policy hash; both are checked
+before any applied verifier operation. The workflow emits
+`one-cli/independent-verifier` for every PR. Normal paths become
+deterministically eligible only after the exact head's pinned `verify` check
+succeeds.
 
 Protected changes are classified from `git diff --name-only` over the exact base
 and head commit objects. Their complete binary/full-index diff also comes from
@@ -165,8 +172,9 @@ that required job has completed successfully does a second job revalidate the
 exact repository, PR, checks, review, base, default-branch head, and
 mergeability, then merge with GitHub's atomic `sha` precondition. The workflow
 token never reads branch-protection or ruleset APIs; the local governance
-readiness port proves the full protection contract before product execution,
-while GitHub's merge API enforces the live rules.
+readiness port proves the workflow blob/policy hash and the full protection
+contract, including both required checks pinned to App ID `15368`, before
+product execution, while GitHub's merge API enforces the live rules.
 
 ## Delivery behavior
 
@@ -197,8 +205,9 @@ approval.
 Issue creation is reserved and fsynced before GitHub is called. An interrupted
 reservation is `in_doubt`; restart reconciles exactly one matching marker.
 Zero or multiple matches require manual resolution and are never recreated.
-Stale harness locks also require explicit operator resolution; automatic
-reclaim is intentionally disabled to prevent split ownership.
+Stale harness locks are reclaimed through an atomic recovery mutex with
+owner-token and inode revalidation, preventing both permanent crash stalls and
+split ownership.
 
 ## launchd
 

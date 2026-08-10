@@ -156,6 +156,7 @@ if (
   policy?.workflow?.event !== "pull_request_target" ||
   !/^[0-9a-f]{40}$/u.test(policy?.workflow?.blobSha ?? "") ||
   policy?.workflow?.policyVersion !== "one-cli.independent-verifier/v4" ||
+  !/^[0-9a-f]{64}$/u.test(policy?.workflow?.policyHash ?? "") ||
   policy?.emittedCheck?.name !== "one-cli/independent-verifier" ||
   policy?.emittedCheck?.appId !== 15368 ||
   policy?.requiredChecks?.length !== 2 ||
@@ -170,10 +171,10 @@ if (
 }
 if (
   policy?.reviewIdentity?.actor !== "github-actions[bot]" ||
-  policy?.reviewIdentity?.appSlug !== "github-actions" ||
-  policy?.reviewIdentity?.appId !== 15368
+  policy?.reviewIdentity?.appId !== 15368 ||
+  policy?.reviewIdentity?.actorId !== 41898282
 ) {
-  failures.push("verifier review actor and App ID are not pinned");
+  failures.push("verifier review actor, user ID, and App ID are not pinned");
 }
 for (const protectedPath of trustedVerifierExactPaths) {
   if (!policy?.protectedPaths?.exact?.includes(protectedPath)) {
@@ -196,6 +197,7 @@ for (const expected of [
   "fetch-depth: 0",
   "persist-credentials: false",
   "ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4",
+  `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
   "name: one-cli/independent-verifier",
   "models: read",
   "GITHUB_TOKEN: ${{ github.token }}",
@@ -208,6 +210,30 @@ for (const expected of [
 ]) {
   if (!workflow.includes(expected)) failures.push(`independent verifier workflow lacks ${expected}`);
 }
+const workflowDocument = YAML.parse(workflow);
+const exactPermissions = (actual, expected, label) => {
+  if (
+    actual === null ||
+    typeof actual !== "object" ||
+    Array.isArray(actual) ||
+    JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(expected).sort()) ||
+    Object.entries(expected).some(([key, value]) => actual[key] !== value)
+  ) {
+    failures.push(`${label} permissions are not the exact least-privilege set`);
+  }
+};
+exactPermissions(workflowDocument?.permissions, { contents: "read" }, "workflow");
+exactPermissions(workflowDocument?.jobs?.verifier?.permissions, {
+  contents: "read",
+  checks: "read",
+  "pull-requests": "write",
+  models: "read",
+}, "verifier job");
+exactPermissions(workflowDocument?.jobs?.merge?.permissions, {
+  contents: "write",
+  checks: "read",
+  "pull-requests": "read",
+}, "merge job");
 const untrustedCheckout = workflow.indexOf("Check out untrusted pull data");
 const verifierExecution = workflow.indexOf("Verify exact pull and publish App evidence");
 if (
@@ -232,7 +258,13 @@ for (const expected of [
   "assertBoundApproval",
   "mergeExactHead",
   "sha: binding.headSha",
-  "assertInstallationIdentity",
+  "assertTrustedActionsContext",
+  'environment.GITHUB_ACTIONS !== "true"',
+  'environment.GITHUB_REPOSITORY !== expectedRepository',
+  'github.request("GET", "/user", undefined, [403, 404])',
+  "actor.id !== policy.reviewIdentity.actorId",
+  "verifierModule.verifierPolicyHash(policy)",
+  "verifierModule.inspectTrustedVerifier(trustedRoot, policy)",
   "assertMergePreconditions",
   "Default branch advanced after verification",
   "repository.default_branch",
@@ -244,6 +276,9 @@ for (const expected of [
 }
 if (/branches\/[^/]+\/protection|\/rulesets/u.test(verifierScript)) {
   failures.push("trusted workflow token must not call branch-protection or ruleset APIs");
+}
+if (/\/installation|\/actions\/permissions/u.test(verifierScript)) {
+  failures.push("trusted workflow token must not call installation or administration APIs");
 }
 const verifierRuntimeSources = [
   harnessIndex,

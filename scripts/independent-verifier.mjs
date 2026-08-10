@@ -20,10 +20,12 @@ export async function main(argv = process.argv.slice(2), environment = process.e
   assertCheckout(trustedRoot, binding.baseSha, "trusted default-branch checkout");
   if (options.merge) {
     const github = githubClient(environment, policy);
-    await assertInstallationIdentity(
+    assertTrustedWorkflowPins(verifierModule, trustedRoot, policy, environment);
+    await assertTrustedActionsContext(
       github,
-      String(policy.reviewIdentity.appId),
-      policy.reviewIdentity.appSlug,
+      policy,
+      binding,
+      environment,
     );
     await waitForPinnedChecks(github, policy, binding, policy.requiredChecks, environment);
     await assertMergePreconditions(github, policy, binding, environment);
@@ -76,10 +78,12 @@ export async function main(argv = process.argv.slice(2), environment = process.e
   }
 
   const github = githubClient(environment, policy);
-  await assertInstallationIdentity(
+  assertTrustedWorkflowPins(verifierModule, trustedRoot, policy, environment);
+  await assertTrustedActionsContext(
     github,
-    String(policy.reviewIdentity.appId),
-    policy.reviewIdentity.appSlug,
+    policy,
+    binding,
+    environment,
   );
   const marker = operationMarker(binding);
   try {
@@ -449,10 +453,41 @@ async function revalidatePull(github, policy, binding, requireMergeable = false)
   }
 }
 
-export async function assertInstallationIdentity(github, expectedAppId, expectedSlug) {
-  const installation = record(await github.request("GET", "/installation"), "App installation");
-  if (String(installation.app_id) !== expectedAppId || installation.app_slug !== expectedSlug) {
-    throw new Error("Verifier token identity does not match the pinned App ID and slug");
+function assertTrustedWorkflowPins(verifierModule, trustedRoot, policy, environment) {
+  if (
+    requiredEnvironment(environment, "ONE_CLI_VERIFIER_POLICY_VERSION") !==
+      policy.workflow.policyVersion ||
+    requiredEnvironment(environment, "ONE_CLI_VERIFIER_POLICY_SHA256") !==
+      policy.workflow.policyHash ||
+    verifierModule.verifierPolicyHash(policy) !== policy.workflow.policyHash
+  ) {
+    throw new Error("Trusted workflow policy version or hash does not match the loaded policy");
+  }
+  const readiness = verifierModule.inspectTrustedVerifier(trustedRoot, policy);
+  if (readiness.ready !== true) {
+    throw new Error(`Trusted workflow blob or policy pin is invalid: ${readiness.detail}`);
+  }
+}
+
+export async function assertTrustedActionsContext(github, policy, binding, environment) {
+  const expectedRepository = `${policy.repository.owner}/${policy.repository.name}`;
+  if (
+    environment.GITHUB_ACTIONS !== "true" ||
+    environment.GITHUB_REPOSITORY !== expectedRepository ||
+    environment.GITHUB_REPOSITORY !== binding.repository ||
+    environment.GITHUB_EVENT_NAME !== policy.workflow.event
+  ) {
+    throw new Error("Applied verifier is not running in the exact trusted GitHub Actions context");
+  }
+  const identity = await github.request("GET", "/user", undefined, [403, 404]);
+  if (identity === undefined) return;
+  const actor = record(identity, "workflow token actor");
+  if (
+    actor.login !== policy.reviewIdentity.actor ||
+    actor.id !== policy.reviewIdentity.actorId ||
+    actor.type !== "Bot"
+  ) {
+    throw new Error("Workflow token actor does not match the pinned GitHub Actions bot");
   }
 }
 
@@ -619,7 +654,7 @@ class GitHubApi {
     this.timeoutMs = timeoutMs;
   }
 
-  async request(method, apiPath, body) {
+  async request(method, apiPath, body, allowedStatuses = []) {
     if (!apiPath.startsWith("/") || apiPath.startsWith("//") || /[\0\r\n]/u.test(apiPath)) {
       throw new Error("GitHub API path is invalid");
     }
@@ -641,6 +676,7 @@ class GitHubApi {
       });
       const value = await boundedJson(response, MAX_API_BYTES, "GitHub API");
       if (!response.ok) {
+        if (allowedStatuses.includes(response.status)) return undefined;
         throw new Error(`GitHub API ${method} ${apiPath} returned HTTP ${response.status}`);
       }
       return value;

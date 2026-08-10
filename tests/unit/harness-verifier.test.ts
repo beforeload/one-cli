@@ -41,8 +41,8 @@ describe("trusted independent verifier policy", () => {
       emittedCheck: { name: "one-cli/independent-verifier", appId: 15368 },
       reviewIdentity: {
         appId: 15368,
-        appSlug: "github-actions",
         actor: "github-actions[bot]",
+        actorId: 41898282,
       },
       semanticReview: { quorum: 2 },
     });
