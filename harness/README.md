@@ -222,7 +222,8 @@ registration token is unset before service installation and is never persisted.
 Before service installation, the script writes the runner's private `.env` with
 only canonical `ONE_CLI_NODE_BIN` and its strict PATH (Node bin, Homebrew, and
 system paths), so Actions never relies on an interactive shell or a network
-toolchain setup action.
+toolchain setup action. The runner workspace remains host-private state outside
+the repository.
 
 ## Delivery behavior
 
