@@ -27,14 +27,23 @@ describe("harness active release integration", () => {
     const bytes = Buffer.from("immutable active release");
     fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
     fs.writeFileSync(entrypoint, bytes);
-    fs.writeFileSync(path.join(release, "manifest.json"), JSON.stringify({
+    const manifestBody = {
+      version: 1,
       commitSha: sha,
+      totalBytes: bytes.length,
       files: [{
         path: "dist/index.js",
+        bytes: bytes.length,
         sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        executable: false,
       }],
+    };
+    fs.writeFileSync(path.join(release, "manifest.json"), JSON.stringify({
+      ...manifestBody,
+      manifestSha256: crypto.createHash("sha256").update(stableJson(manifestBody)).digest("hex"),
     }));
     fs.writeFileSync(path.join(home, "autonomy", repoKey, "releases", "state.json"), JSON.stringify({
+      version: 1,
       active: sha,
       generation: 1,
     }));
@@ -79,4 +88,15 @@ function temporary(name: string): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
   roots.push(root);
   return fs.realpathSync(root);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

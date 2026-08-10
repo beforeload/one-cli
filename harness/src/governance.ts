@@ -1,6 +1,11 @@
 import type { ProcessRunner } from "./runner.js";
 import { requireSuccess } from "./runner.js";
 import type { IndependentVerifierPolicy } from "./verifier.js";
+import type {
+  WorkerPolicyReadiness,
+  WorkerPolicyReadinessPort,
+  WorkerReleaseInspection,
+} from "./worker-policy.js";
 
 export interface GovernanceReadinessCheck {
   readonly name: string;
@@ -12,6 +17,7 @@ export interface GovernanceReadiness {
   readonly schema: "one-cli.harness/governance-readiness-v1";
   readonly ready: boolean;
   readonly checks: readonly GovernanceReadinessCheck[];
+  readonly release: WorkerReleaseInspection | null;
 }
 
 export interface GovernanceReadinessPort {
@@ -28,6 +34,8 @@ interface ReadinessInput {
     readonly defaultBranch: string;
   };
   readonly policy: IndependentVerifierPolicy;
+  readonly tokenEnvironmentNames: readonly string[];
+  readonly workerPolicy: WorkerPolicyReadinessPort;
 }
 
 interface ApiResult {
@@ -40,6 +48,16 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
 
   async inspect(signal?: AbortSignal): Promise<GovernanceReadiness> {
     const { repository, policy } = this.input;
+    let workerPolicy: WorkerPolicyReadiness;
+    try {
+      workerPolicy = await this.input.workerPolicy.inspect(signal);
+    } catch (error) {
+      workerPolicy = {
+        ready: false,
+        detail: message(error),
+        release: null,
+      };
+    }
     const repositoryPath = `repos/${encodeURIComponent(repository.owner)}/${
       encodeURIComponent(repository.repo)
     }`;
@@ -51,16 +69,23 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
       .map(encodeURIComponent)
       .join("/");
     const [
+      authResult,
+      userResult,
       repoResult,
+      issuesResult,
+      pullsResult,
       workflowResult,
       contentResult,
       actionsWorkflowResult,
       protectionResult,
-      installationResult,
       runnersResult,
     ] =
       await Promise.all([
+        this.auth(signal),
+        this.get("user", signal),
         this.get(repositoryPath, signal),
+        this.get(`${repositoryPath}/issues?state=all&per_page=1`, signal),
+        this.get(`${repositoryPath}/pulls?state=all&per_page=1`, signal),
         this.get(
           `${repositoryPath}/actions/workflows/${
             encodeURIComponent(policy.workflow.path.split("/").at(-1)!)
@@ -75,7 +100,6 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         ),
         this.get(`${repositoryPath}/actions/permissions/workflow`, signal),
         this.get(`${defaultBranchPath}/protection`, signal),
-        this.get("installation", signal),
         this.get(`${repositoryPath}/actions/runners?per_page=100`, signal),
       ]);
 
@@ -95,7 +119,77 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         : "Tracked repository identity differs from verifier policy",
     );
 
+    const tokenEnvironmentNames = [...new Set([
+      ...this.input.tokenEnvironmentNames,
+      ...Object.keys(this.input.environment).filter((name) =>
+        name === "GH_TOKEN" || name === "GITHUB_TOKEN"
+      ),
+    ])].sort();
+    const noTokenEnvironment = tokenEnvironmentNames.length === 0;
+    add(
+      "builder-no-token-environment",
+      noTokenEnvironment,
+      noTokenEnvironment
+        ? "GH_TOKEN and GITHUB_TOKEN are absent; gh must use its canonical keyring config"
+        : `Token-bearing environment variables are forbidden: ${tokenEnvironmentNames.join(", ")}`,
+    );
+    add(
+      "builder-keyring-auth",
+      authResult.error === undefined && noTokenEnvironment,
+      authResult.error === undefined && noTokenEnvironment
+        ? "canonical gh executable and config authenticated without exported tokens"
+        : authResult.error ?? "Token-bearing environment bypasses keyring authentication",
+    );
+    const user = resultRecord(userResult, "authenticated user");
+    const builderLoginOk =
+      repository.owner === "beforeload" &&
+      user.value?.login === repository.owner;
+    add(
+      "builder-login",
+      builderLoginOk,
+      builderLoginOk
+        ? "authenticated host builder login is exactly beforeload"
+        : user.error ?? "Authenticated gh login must exactly match repository owner beforeload",
+    );
+
     const repo = resultRecord(repoResult, "repository");
+    const repoOwner = nestedRecord(repo.value, "owner");
+    const repoPermissions = nestedRecord(repo.value, "permissions");
+    const pushCapabilityOk =
+      builderLoginOk &&
+      repo.value?.full_name === `${repository.owner}/${repository.repo}` &&
+      repoOwner.value?.login === repository.owner &&
+      repoPermissions.value?.push === true;
+    add(
+      "builder-repository-push",
+      pushCapabilityOk,
+      pushCapabilityOk
+        ? "repository metadata grants beforeload push capability"
+        : repo.error ??
+          repoOwner.error ??
+          repoPermissions.error ??
+          "Authenticated builder lacks repository push capability",
+    );
+    const issuesCapabilityOk =
+      pushCapabilityOk &&
+      repo.value?.has_issues === true &&
+      Array.isArray(issuesResult.value);
+    add(
+      "builder-issues-capability",
+      issuesCapabilityOk,
+      issuesCapabilityOk
+        ? "issues are enabled and the authenticated builder can probe the fixed issue endpoint"
+        : issuesResult.error ?? "Authenticated builder issue capability probe failed",
+    );
+    const pullsCapabilityOk = pushCapabilityOk && Array.isArray(pullsResult.value);
+    add(
+      "builder-pull-request-capability",
+      pullsCapabilityOk,
+      pullsCapabilityOk
+        ? "authenticated builder can probe the fixed pull-request endpoint"
+        : pullsResult.error ?? "Authenticated builder pull-request capability probe failed",
+    );
+
     const defaultBranchOk =
       repositoryMatches &&
       repo.value?.default_branch === policy.repository.defaultBranch;
@@ -276,17 +370,10 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         : reviews.error ?? "Last-push approval is not required",
     );
 
-    const installation = resultRecord(installationResult, "runtime installation");
-    const permissions = nestedRecord(installation.value, "permissions");
-    const protectionReadOnly = permissions.value?.administration === "read";
     add(
-      "runtime-no-protection-write",
-      protectionReadOnly && installation.value !== undefined,
-      protectionReadOnly && installation.value !== undefined
-        ? "runtime identity has administration:read and no administration:write"
-        : installation.error ??
-          permissions.error ??
-          "Runtime identity must have read-only repository administration permission",
+      "worker-tool-policy",
+      workerPolicy.ready,
+      workerPolicy.detail,
     );
 
     const runnerInventory = resultRecord(runnersResult, "repository runner inventory");
@@ -336,7 +423,27 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
       schema: "one-cli.harness/governance-readiness-v1",
       ready: checks.every((check) => check.ok),
       checks,
+      release: workerPolicy.release,
     };
+  }
+
+  private async auth(signal?: AbortSignal): Promise<ApiResult> {
+    try {
+      requireSuccess(
+        "gh auth status",
+        await this.input.runner.run({
+          executable: this.input.ghExecutable,
+          args: ["auth", "status", "--hostname", "github.com"],
+          env: this.input.environment,
+          timeoutMs: 15_000,
+          maxOutputBytes: 256 * 1024,
+          ...(signal ? { signal } : {}),
+        }),
+      );
+      return { value: true };
+    } catch (error) {
+      return { error: message(error) };
+    }
   }
 
   private async get(apiPath: string, signal?: AbortSignal): Promise<ApiResult> {

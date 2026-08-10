@@ -98,7 +98,12 @@ requires exactly `verify` and `one-cli/independent-verifier`;
 must be allowed to approve pull request reviews. Local governance readiness
 must prove strict status checks, admin enforcement, disabled force pushes and
 deletions, exact App-pinned checks, stale-review dismissal, at least one
-approval, and last-push approval before product execution.
+approval, and last-push approval before product execution. It also requires
+the keyring-backed canonical `gh` login to be exactly the repository owner
+`beforeload`, rejects `GH_TOKEN` and `GITHUB_TOKEN`, probes only fixed read-only
+repository/issue/pull endpoints for builder capabilities, and verifies the
+protected model-Worker policy still excludes shell/network tools and enforces
+exact approved write paths.
 
 The verifier and merge jobs run only on a repository runner with exact
 `self-hosted`, `macOS`, and `one-cli-verifier` labels. Governance readiness uses
@@ -125,7 +130,11 @@ revalidates repository identity and `default_branch`, the live default-branch
 head, base SHA, head SHA, required-check App provenance, review actor/commit,
 and mergeability, then merges with an exact-SHA precondition. The workflow token
 does not call branch-protection or ruleset APIs; GitHub's merge API enforces the
-live protection rules. No runtime path may change or lower branch protection.
+live protection rules. The host runtime is trusted and its owner credential
+coordinates repository writes, but model Workers receive no owner token,
+verifier credential, App value, or private key and cannot access the keyring.
+No allowed host, Worker, or verifier operation calls branch-administration,
+branch-protection mutation, or ruleset APIs.
 
 Tracked content must not contain credentials, tokens, host-private paths,
 runtime ledgers, checkpoints, task identifiers, or reporting endpoints. The

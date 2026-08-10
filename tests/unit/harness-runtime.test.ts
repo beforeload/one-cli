@@ -261,7 +261,14 @@ describe("durable harness runtime", () => {
     const journal = new HostJournal(path.join(root, "journal.jsonl"));
     let verifierTicks = 0;
     const productFailure = automaticLanes(
-      { inspect: async () => ({ schema: "one-cli.harness/governance-readiness-v1", ready: true, checks: [] }) },
+      {
+        inspect: async () => ({
+          schema: "one-cli.harness/governance-readiness-v1",
+          ready: true,
+          checks: [],
+          release: null,
+        }),
+      },
       { tick: async () => { throw new Error("product unavailable"); } },
       {
         tick: async () => {
@@ -281,7 +288,14 @@ describe("durable harness runtime", () => {
 
     let productTicks = 0;
     const verifierFailure = automaticLanes(
-      { inspect: async () => ({ schema: "one-cli.harness/governance-readiness-v1", ready: true, checks: [] }) },
+      {
+        inspect: async () => ({
+          schema: "one-cli.harness/governance-readiness-v1",
+          ready: true,
+          checks: [],
+          release: null,
+        }),
+      },
       {
         tick: async () => {
           productTicks++;

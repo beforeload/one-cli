@@ -15,6 +15,9 @@ import {
   requireTwoProfileVetoQuorum,
   semanticVetoPrompt,
 } from "../../harness/src/verifier-review.js";
+import {
+  WORKER_CONTROL_PATHS,
+} from "../../harness/src/worker-policy.js";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const POLICY = path.join(ROOT, "harness/verifier-policy.yml");
@@ -107,7 +110,14 @@ describe("trusted independent verifier policy", () => {
       expect(isProtectedPath(policy, trustedClosurePath)).toBe(true);
     }
     expect(isProtectedPath(policy, "src/index.ts")).toBe(false);
-    expect(isProtectedPath(policy, "src/agent.ts")).toBe(false);
+    expect(isProtectedPath(policy, "src/agent.ts")).toBe(true);
+  });
+
+  it("protects and verifies the product Worker no-shell/no-network boundary", () => {
+    const policy = loadVerifierPolicy(POLICY);
+    for (const controlPath of WORKER_CONTROL_PATHS) {
+      expect(isProtectedPath(policy, controlPath)).toBe(true);
+    }
   });
 
   it("requires two matching non-veto profiles and treats either model only as a veto", () => {
@@ -196,6 +206,8 @@ describe("trusted independent verifier policy", () => {
     expect(localSources).not.toMatch(
       /["'](?:PUT|PATCH|DELETE)["'][\s\S]{0,300}(?:branches\/[^/]+\/protection|\/rulesets)/u,
     );
+    expect(localSources).not.toMatch(/ONE_CLI_BUILDER_APP_ID|\/installation/u);
+    expect(localSources).not.toMatch(/--api-(?:path|endpoint)/u);
   });
 
   it("makes doctor fail closed on unpinned workflow, App checks, or stale reviews", () => {

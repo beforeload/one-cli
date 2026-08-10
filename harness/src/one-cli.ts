@@ -252,8 +252,11 @@ export class OneCliClient {
     return typeof this.releaseResolver === "string"
       ? {
           entrypoint: path.resolve(this.releaseResolver),
+          root: path.dirname(path.dirname(path.resolve(this.releaseResolver))),
           sha: null,
           bootstrap: true,
+          manifestSha256: null,
+          files: [],
         }
       : this.releaseResolver();
   }

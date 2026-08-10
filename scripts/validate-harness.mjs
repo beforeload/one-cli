@@ -29,6 +29,7 @@ const required = [
   "harness/src/supervisor.ts",
   "harness/src/verifier-review.ts",
   "harness/src/verifier.ts",
+  "harness/src/worker-policy.ts",
   "package.json",
   "package-lock.json",
   "scripts/bootstrap-verifier-runner.sh",
@@ -51,6 +52,17 @@ const trustedVerifierExactPaths = [
   "tsconfig.json",
   "tsconfig.build.json",
   "harness/tsconfig.json",
+  "src/agent.ts",
+  "src/approval.ts",
+  "src/autonomy/cli.ts",
+  "src/autonomy/intake.ts",
+  "src/autonomy/maintenance.ts",
+  "src/autonomy/orchestrator.ts",
+  "src/autonomy/roadmap-enforcement.ts",
+  "src/autonomy/worker.ts",
+  "src/policy.ts",
+  "src/tools.ts",
+  "src/workspace.ts",
 ];
 for (const relative of required) {
   const absolute = path.join(root, relative);
@@ -139,14 +151,18 @@ if (!harnessIndex.includes('options.command === "run" && options.dryRun')) {
   failures.push("run --dry-run is not intercepted before mutable runtime setup");
 }
 for (const expected of [
-  "probeLeastPrivilegeBuilder",
-  "ONE_CLI_BUILDER_APP_ID",
-  "Builder App has forbidden write permissions",
+  "safeEnvironment",
+  "canonicalGhEnvironment",
+  "tokenBearingEnvironmentNames",
+  "WorkerReleaseReadiness",
   "GhGovernanceReadinessPort",
   "governance.inspect",
   "governanceFailureDetail",
 ]) {
   if (!harnessIndex.includes(expected)) failures.push(`harness doctor lacks ${expected}`);
+}
+if (/ONE_CLI_BUILDER_APP_ID|\/installation/u.test(harnessIndex)) {
+  failures.push("harness still requires the obsolete local Builder App");
 }
 
 const policy = YAML.parse(read("harness/verifier-policy.yml"));
@@ -341,6 +357,7 @@ if (/\/installation|\/actions\/permissions/u.test(verifierScript)) {
 }
 const verifierRuntimeSources = [
   harnessIndex,
+  read("harness/src/github.ts"),
   read("harness/src/governance.ts"),
   read("harness/src/verifier.ts"),
   read("scripts/independent-verifier.mjs"),
@@ -352,6 +369,12 @@ if (
     .test(verifierRuntimeSources)
 ) {
   failures.push("runtime verifier code can mutate or requests branch protection authority");
+}
+if (
+  /process\.argv[\s\S]{0,300}\bapi\b/u.test(verifierRuntimeSources) ||
+  /--api-(?:path|endpoint)/u.test(verifierRuntimeSources)
+) {
+  failures.push("harness exposes a user-controlled generic gh API path");
 }
 if (/create-github-app-token|ONE_CLI_VERIFIER_APP_PRIVATE_KEY|secrets\./u.test(workflow)) {
   failures.push("independent verifier workflow references a custom App or repository secret");
