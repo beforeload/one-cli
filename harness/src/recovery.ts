@@ -119,6 +119,7 @@ export class HarnessRecovery {
       "retry",
       attempt.id,
       receipt.fingerprint,
+      receipt.hash,
       diagnosis.category,
       target,
     );

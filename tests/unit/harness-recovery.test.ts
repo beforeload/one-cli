@@ -9,6 +9,7 @@ import {
 import type {
   AutonomyStatus,
   OneCliClient,
+  RecoveryEvidence,
 } from "../../harness/src/one-cli.js";
 import {
   createMachineEvidence,
@@ -53,6 +54,30 @@ describe("harness machine recovery", () => {
     expect(first.hash).toMatch(/^[0-9a-f]{64}$/u);
     expect(createMachineEvidence(failure, diagnosis, "operation-2", recoveryKey).hash)
       .not.toBe(first.hash);
+  });
+
+  it("uses a new retry operation for a new receipt of the same failure", async () => {
+    const fixture = recoveryFixture();
+    const first = receipt({ operation: "gate:test", hash: "b".repeat(64) });
+    const second = receipt({ operation: "gate:test", hash: "c".repeat(64), timestamp: 10_001 });
+
+    for (const failure of [first, second]) {
+      await fixture.recovery.recoverWaitingAttempt(status({
+        detail: {
+          lastFailure: {
+            operation: "gate:test",
+            count: 1,
+            fingerprint: failure.fingerprint,
+            receipt: failure,
+          },
+          failureReceipts: [failure],
+        },
+      }), "normal");
+    }
+
+    expect(fixture.retries).toHaveLength(2);
+    expect(fixture.retries[0]?.provenance.operationId)
+      .not.toBe(fixture.retries[1]?.provenance.operationId);
   });
 
   it("probes a #7-like legacy gate:install failure then retries without manual evidence", async () => {
@@ -292,7 +317,7 @@ function recoveryFixture(now?: () => number) {
   const journal = new HostJournal(path.join(root, "journal.jsonl"));
   const github = new RecoveryGitHub();
   const probes: Array<{ receipt: FailureReceiptView }> = [];
-  const retries: unknown[] = [];
+  const retries: RecoveryEvidence[] = [];
   const oneCli = {
     probeFailureGate: async () => {
       const captured = receipt({ operation: "gate:install", gate: "install" });
@@ -307,7 +332,7 @@ function recoveryFixture(now?: () => number) {
     },
     machineRetry: async (
       _attemptId: string,
-      evidence: unknown,
+      evidence: RecoveryEvidence,
     ) => {
       retries.push(evidence);
       return { action: "machine-retry", state: "implementing", attemptId: "attempt-7" };
