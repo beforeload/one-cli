@@ -447,6 +447,47 @@ describe("portable autonomy adapters", () => {
     expect(runner.requests[0]?.timeoutMs).toBe(10 * 60_000);
   });
 
+  it("injects only a credential-free loopback proxy for network-enabled gates", async () => {
+    const workspace = path.join(root, "proxied-gate-workspace");
+    fs.mkdirSync(workspace);
+    const runner = new FakeProcessRunner();
+    const sandbox = new DarwinSandbox({
+      workspace,
+      commands: {
+        install: { executable: "/bin/echo", args: ["install"], network: true },
+        build: { executable: "/bin/echo", args: ["build"] },
+      },
+      runner,
+      platform: "darwin",
+      isExecutable: () => true,
+      networkProxy: "http://127.0.0.1:9674",
+    });
+
+    await sandbox.run("install");
+    await sandbox.run("build");
+
+    expect(runner.requests[0]?.env).toMatchObject({
+      HTTP_PROXY: "http://127.0.0.1:9674/",
+      HTTPS_PROXY: "http://127.0.0.1:9674/",
+      NO_PROXY: "127.0.0.1,localhost",
+    });
+    expect(runner.requests[1]?.env).not.toHaveProperty("HTTP_PROXY");
+    for (const invalid of [
+      "https://127.0.0.1:9674",
+      "http://example.com:9674",
+      "http://user:password@127.0.0.1:9674",
+      "http://127.0.0.1:9674/path",
+    ]) {
+      expect(() => new DarwinSandbox({
+        workspace,
+        commands: {},
+        platform: "darwin",
+        isExecutable: () => true,
+        networkProxy: invalid,
+      })).toThrow("credential-free loopback HTTP");
+    }
+  });
+
   it("escapes paths embedded in sandbox profiles", () => {
     const profile = buildDarwinSandboxProfile(
       '/tmp/workspace") (allow network*) ("',

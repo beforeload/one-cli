@@ -105,8 +105,14 @@ cat >"$HOME/.one-cli/harness.env" <<'EOF'
 OPENAI_API_KEY=replace-on-host
 OPENAI_MODEL=replace-on-host
 ONE_CLI_GH_EXECUTABLE=/opt/homebrew/bin/gh
+ONE_CLI_SANDBOX_PROXY=http://127.0.0.1:9674
 EOF
 ```
+
+`ONE_CLI_SANDBOX_PROXY` is optional and accepts only a credential-free
+loopback HTTP URL with an explicit port. It is exposed only to commands whose
+trusted configuration enables network access, allowing macOS-sandboxed package
+installation to delegate DNS resolution without opening Worker network tools.
 
 The host runtime is trusted and uses the existing macOS keyring credential from
 the canonical `gh` executable and canonical `gh` config directory. `GH_TOKEN`
