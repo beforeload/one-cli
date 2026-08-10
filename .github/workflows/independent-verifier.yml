@@ -8,17 +8,22 @@ permissions:
   contents: read
 
 env:
-  ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v3
+  ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4
 
 concurrency:
   group: independent-verifier-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 jobs:
-  trusted-verifier:
-    name: trusted-verifier-job
+  verifier:
+    name: one-cli/independent-verifier
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: write
+      models: read
     steps:
       - name: Check out exact trusted base
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -53,36 +58,65 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Mint independent verifier App token
-        id: verifier-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ vars.ONE_CLI_VERIFIER_APP_ID }}
-          private-key: ${{ secrets.ONE_CLI_VERIFIER_APP_PRIVATE_KEY }}
-          owner: ${{ github.event.repository.owner.login }}
-          repositories: ${{ github.event.repository.name }}
-          permission-checks: write
-          permission-contents: read
-          permission-pull-requests: write
-
-      # This trusted script emits the required check one-cli/independent-verifier.
-      # Untrusted files are read only by bounded git diff commands; none are executed.
-      - name: Verify exact pull and publish App evidence
+      # This job is the required one-cli/independent-verifier check. Untrusted
+      # files are read only by bounded git commands; none are executed.
+      - name: Verify exact pull and submit bound review
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_TOKEN: ${{ github.token }}
           TRUSTED_ROOT: ${{ github.workspace }}/trusted
           UNTRUSTED_ROOT: ${{ github.workspace }}/untrusted
-          VERIFIER_TOKEN: ${{ steps.verifier-token.outputs.token }}
-          ONE_CLI_VERIFIER_APP_ID: ${{ vars.ONE_CLI_VERIFIER_APP_ID }}
-          ONE_CLI_VERIFIER_MODEL_A_API_KEY: ${{ secrets.ONE_CLI_VERIFIER_MODEL_A_API_KEY }}
-          ONE_CLI_VERIFIER_MODEL_A: ${{ vars.ONE_CLI_VERIFIER_MODEL_A }}
-          ONE_CLI_VERIFIER_MODEL_A_BASE_URL: ${{ vars.ONE_CLI_VERIFIER_MODEL_A_BASE_URL }}
-          ONE_CLI_VERIFIER_MODEL_B_API_KEY: ${{ secrets.ONE_CLI_VERIFIER_MODEL_B_API_KEY }}
-          ONE_CLI_VERIFIER_MODEL_B: ${{ vars.ONE_CLI_VERIFIER_MODEL_B }}
-          ONE_CLI_VERIFIER_MODEL_B_BASE_URL: ${{ vars.ONE_CLI_VERIFIER_MODEL_B_BASE_URL }}
+          ONE_CLI_VERIFIER_MODEL_A: ${{ vars.ONE_CLI_VERIFIER_MODEL_A || 'openai/gpt-4.1' }}
+          ONE_CLI_VERIFIER_MODEL_B: ${{ vars.ONE_CLI_VERIFIER_MODEL_B || 'openai/gpt-4.1-mini' }}
         run: >-
           node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"
           --event "$GITHUB_EVENT_PATH"
           --trusted-root "$TRUSTED_ROOT"
           --untrusted-root "$UNTRUSTED_ROOT"
-          --apply
+          --verify
+
+  merge:
+    name: merge-exact-verified-head
+    needs: verifier
+    if: needs.verifier.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Check out exact trusted base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up trusted Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: trusted/package-lock.json
+
+      - name: Install exact trusted dependencies
+        working-directory: trusted
+        run: npm ci --ignore-scripts
+
+      - name: Build exact trusted merger
+        working-directory: trusted
+        run: npm run build
+
+      - name: Revalidate and merge exact verified head
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_ROOT: ${{ github.workspace }}/trusted
+        run: >-
+          node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"
+          --event "$GITHUB_EVENT_PATH"
+          --trusted-root "$TRUSTED_ROOT"
+          --merge

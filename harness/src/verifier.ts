@@ -8,13 +8,12 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/+\-[\]]{0,255}$/u;
 
 export interface SemanticProfilePolicy {
   readonly id: string;
-  readonly apiKeyEnvironment: string;
   readonly modelEnvironment: string;
-  readonly baseUrlEnvironment: string;
+  readonly defaultModel: string;
 }
 
 export interface IndependentVerifierPolicy {
-  readonly schema: "one-cli.independent-verifier/v3";
+  readonly schema: "one-cli.independent-verifier/v4";
   readonly repository: {
     readonly owner: string;
     readonly name: string;
@@ -24,7 +23,7 @@ export interface IndependentVerifierPolicy {
     readonly path: ".github/workflows/independent-verifier.yml";
     readonly event: "pull_request_target";
     readonly blobSha: string;
-    readonly policyVersion: "one-cli.independent-verifier/v3";
+    readonly policyVersion: "one-cli.independent-verifier/v4";
   };
   readonly requiredChecks: readonly {
     readonly name: string;
@@ -32,12 +31,12 @@ export interface IndependentVerifierPolicy {
   }[];
   readonly emittedCheck: {
     readonly name: "one-cli/independent-verifier";
-    readonly appIdEnvironment: "ONE_CLI_VERIFIER_APP_ID";
+    readonly appId: 15368;
   };
   readonly reviewIdentity: {
-    readonly appIdEnvironment: "ONE_CLI_VERIFIER_APP_ID";
-    readonly appSlug: string;
-    readonly actor: string;
+    readonly appId: 15368;
+    readonly appSlug: "github-actions";
+    readonly actor: "github-actions[bot]";
   };
   readonly protectedPaths: {
     readonly exact: readonly string[];
@@ -45,6 +44,8 @@ export interface IndependentVerifierPolicy {
   };
   readonly semanticReview: {
     readonly quorum: 2;
+    readonly baseUrl: "https://models.github.ai/inference/";
+    readonly tokenEnvironment: "GITHUB_TOKEN";
     readonly profiles: readonly [SemanticProfilePolicy, SemanticProfilePolicy];
   };
   readonly limits: {
@@ -69,13 +70,12 @@ export interface PinnedPull {
 }
 
 export interface TrustedVerifierReadiness {
-  readonly schema: "one-cli.harness/verifier-status-v3";
+  readonly schema: "one-cli.harness/verifier-status-v4";
   readonly configured: boolean;
   readonly ready: boolean;
   readonly execution: "trusted-actions-only";
   readonly checkName: string;
   readonly detail: string;
-  readonly localVerifierSecrets: readonly string[];
 }
 
 export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy {
@@ -92,7 +92,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     "limits",
     "merge",
   ], "verifier policy");
-  if (root.schema !== "one-cli.independent-verifier/v3") {
+  if (root.schema !== "one-cli.independent-verifier/v4") {
     throw new Error("Verifier policy schema is invalid");
   }
   const repository = exactRecord(root.repository, [
@@ -110,7 +110,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     workflow.event !== "pull_request_target" ||
     typeof workflow.blobSha !== "string" ||
     !SHA.test(workflow.blobSha) ||
-    workflow.policyVersion !== "one-cli.independent-verifier/v3"
+    workflow.policyVersion !== "one-cli.independent-verifier/v4"
   ) {
     throw new Error("Verifier workflow path, event, blob, or policy version is invalid");
   }
@@ -129,40 +129,52 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   }
   const emittedCheck = exactRecord(
     root.emittedCheck,
-    ["name", "appIdEnvironment"],
+    ["name", "appId"],
     "emitted check",
   );
   if (
     emittedCheck.name !== "one-cli/independent-verifier" ||
-    emittedCheck.appIdEnvironment !== "ONE_CLI_VERIFIER_APP_ID"
+    emittedCheck.appId !== 15368
   ) {
     throw new Error("Emitted verifier check identity is invalid");
   }
-  if (requiredChecks.some((check) => check.name === emittedCheck.name)) {
-    throw new Error("Independent verifier cannot require its own check");
+  if (
+    requiredChecks.length !== 2 ||
+    requiredChecks.some((check) => check.appId !== 15368) ||
+    !requiredChecks.some((check) => check.name === "verify") ||
+    !requiredChecks.some((check) => check.name === emittedCheck.name)
+  ) {
+    throw new Error("Required checks must be exactly verify and the built-in verifier identity");
   }
   const reviewIdentity = exactRecord(
     root.reviewIdentity,
-    ["appIdEnvironment", "appSlug", "actor"],
+    ["appId", "appSlug", "actor"],
     "review identity",
   );
-  if (reviewIdentity.appIdEnvironment !== "ONE_CLI_VERIFIER_APP_ID") {
-    throw new Error("Review identity App ID binding is invalid");
-  }
   const appSlug = safeName(reviewIdentity.appSlug, "review App slug");
   const actor = safeName(reviewIdentity.actor, "review actor");
-  if (actor !== `${appSlug}[bot]`) {
-    throw new Error("Review actor must be exactly bound to the pinned App slug");
+  if (
+    reviewIdentity.appId !== 15368 ||
+    appSlug !== "github-actions" ||
+    actor !== "github-actions[bot]"
+  ) {
+    throw new Error("Review identity must be the built-in GitHub Actions App");
   }
   const protectedPaths = exactRecord(root.protectedPaths, ["exact", "prefixes"], "protected paths");
   const exact = canonicalPaths(stringArray(protectedPaths.exact, "exact protected paths"), false);
   const prefixes = canonicalPaths(stringArray(protectedPaths.prefixes, "protected prefixes"), true);
   const semanticReview = exactRecord(
     root.semanticReview,
-    ["quorum", "profiles"],
+    ["quorum", "baseUrl", "tokenEnvironment", "profiles"],
     "semantic review policy",
   );
   if (semanticReview.quorum !== 2) throw new Error("Semantic review quorum must be exactly 2");
+  if (
+    semanticReview.baseUrl !== "https://models.github.ai/inference/" ||
+    semanticReview.tokenEnvironment !== "GITHUB_TOKEN"
+  ) {
+    throw new Error("Semantic review must use GitHub Models with the ephemeral workflow token");
+  }
   if (!Array.isArray(semanticReview.profiles) || semanticReview.profiles.length !== 2) {
     throw new Error("Semantic review requires exactly two profiles");
   }
@@ -173,7 +185,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   if (new Set(profiles.map((profile) => profile.id)).size !== 2) {
     throw new Error("Semantic review profile IDs must be independent");
   }
-  for (const key of ["apiKeyEnvironment", "modelEnvironment", "baseUrlEnvironment"] as const) {
+  for (const key of ["modelEnvironment", "defaultModel"] as const) {
     if (profiles[0][key] === profiles[1][key]) {
       throw new Error(`Semantic review profiles must use distinct ${key} bindings`);
     }
@@ -191,7 +203,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     throw new Error("Verifier merge method is invalid");
   }
   return {
-    schema: "one-cli.independent-verifier/v3",
+    schema: "one-cli.independent-verifier/v4",
     repository: {
       owner: repositorySlug(repository.owner, "repository owner"),
       name: repositorySlug(repository.name, "repository name"),
@@ -201,20 +213,25 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
       path: ".github/workflows/independent-verifier.yml",
       event: "pull_request_target",
       blobSha: workflow.blobSha,
-      policyVersion: "one-cli.independent-verifier/v3",
+      policyVersion: "one-cli.independent-verifier/v4",
     },
     requiredChecks,
     emittedCheck: {
       name: "one-cli/independent-verifier",
-      appIdEnvironment: "ONE_CLI_VERIFIER_APP_ID",
+      appId: 15368,
     },
     reviewIdentity: {
-      appIdEnvironment: "ONE_CLI_VERIFIER_APP_ID",
-      appSlug,
-      actor,
+      appId: 15368,
+      appSlug: "github-actions",
+      actor: "github-actions[bot]",
     },
     protectedPaths: { exact, prefixes },
-    semanticReview: { quorum: 2, profiles },
+    semanticReview: {
+      quorum: 2,
+      baseUrl: "https://models.github.ai/inference/",
+      tokenEnvironment: "GITHUB_TOKEN",
+      profiles,
+    },
     limits: {
       maxChangedFiles: boundedInteger(limits.maxChangedFiles, 1, 1_000, "changed-file limit"),
       maxDiffBytes: boundedInteger(limits.maxDiffBytes, 1_024, 16 * 1024 * 1024, "diff byte limit"),
@@ -264,11 +281,10 @@ export function isProtectedPath(
 export function inspectTrustedVerifier(
   workspace: string,
   policy: IndependentVerifierPolicy,
-  localVerifierSecrets: readonly string[],
 ): TrustedVerifierReadiness {
   const workflowPath = path.join(workspace, policy.workflow.path);
   let detail = "Trusted pull_request_target verifier workflow and policy are present";
-  let ready = localVerifierSecrets.length === 0;
+  let ready = true;
   try {
     const workflow = readBoundedRegularFile(workflowPath, "independent verifier workflow");
     for (const expected of [
@@ -292,35 +308,26 @@ export function inspectTrustedVerifier(
     ready = false;
     detail = error instanceof Error ? error.message : String(error);
   }
-  if (localVerifierSecrets.length > 0) {
-    ready = false;
-    detail =
-      `Verifier credentials must exist only in trusted Actions, not the local harness: ` +
-      localVerifierSecrets.join(", ");
-  }
   return {
-    schema: "one-cli.harness/verifier-status-v3",
+    schema: "one-cli.harness/verifier-status-v4",
     configured: true,
     ready,
     execution: "trusted-actions-only",
     checkName: policy.emittedCheck.name,
     detail,
-    localVerifierSecrets: [...localVerifierSecrets],
   };
 }
 
 function parseProfile(value: unknown): SemanticProfilePolicy {
   const profile = exactRecord(value, [
     "id",
-    "apiKeyEnvironment",
     "modelEnvironment",
-    "baseUrlEnvironment",
+    "defaultModel",
   ], "semantic profile");
   return {
     id: safeName(profile.id, "semantic profile ID"),
-    apiKeyEnvironment: environmentName(profile.apiKeyEnvironment, "profile API key environment"),
     modelEnvironment: environmentName(profile.modelEnvironment, "profile model environment"),
-    baseUrlEnvironment: environmentName(profile.baseUrlEnvironment, "profile base URL environment"),
+    defaultModel: safeName(profile.defaultModel, "profile default model"),
   };
 }
 

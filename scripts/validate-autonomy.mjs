@@ -104,6 +104,7 @@ for (const [file, values] of Object.entries({
   ],
   ".autonomy/quality-gates.yml": [
     "    - verify",
+    "    - one-cli/independent-verifier",
     "    - AUTONOMY.md",
     "    - .autonomy/**",
     "    - .github/workflows/**",
@@ -339,6 +340,15 @@ for (const codeownerPath of [
 }
 
 const verifierPolicy = YAML.parse(documents.get("harness/verifier-policy.yml") ?? "");
+if (
+  verifierPolicy?.requiredChecks?.length !== 2 ||
+  verifierPolicy.requiredChecks.some((check) => check?.appId !== 15368) ||
+  verifierPolicy.requiredChecks[0]?.name !== "verify" ||
+  verifierPolicy.requiredChecks[1]?.name !== "one-cli/independent-verifier" ||
+  verifierPolicy?.reviewIdentity?.actor !== "github-actions[bot]"
+) {
+  failures.push("harness/verifier-policy.yml must pin both checks and review to GitHub Actions");
+}
 for (const protectedPath of [
   "AUTONOMY.md",
   ".github/CODEOWNERS",

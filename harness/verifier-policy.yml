@@ -1,4 +1,4 @@
-schema: one-cli.independent-verifier/v3
+schema: one-cli.independent-verifier/v4
 
 repository:
   owner: beforeload
@@ -8,22 +8,23 @@ repository:
 workflow:
   path: .github/workflows/independent-verifier.yml
   event: pull_request_target
-  blobSha: c673004af63c31033aaa121b21aff72cea4a5f8c
-  policyVersion: one-cli.independent-verifier/v3
+  blobSha: ea333ef8320ac39b2cd9a0f618cc98e7149f680f
+  policyVersion: one-cli.independent-verifier/v4
 
 requiredChecks:
   - name: verify
-    # GitHub Actions App. Branch protection should pin this App where supported.
+    appId: 15368
+  - name: one-cli/independent-verifier
     appId: 15368
 
 emittedCheck:
   name: one-cli/independent-verifier
-  appIdEnvironment: ONE_CLI_VERIFIER_APP_ID
+  appId: 15368
 
 reviewIdentity:
-  appIdEnvironment: ONE_CLI_VERIFIER_APP_ID
-  appSlug: one-cli-verifier
-  actor: one-cli-verifier[bot]
+  appId: 15368
+  appSlug: github-actions
+  actor: github-actions[bot]
 
 protectedPaths:
   exact:
@@ -45,15 +46,15 @@ protectedPaths:
 
 semanticReview:
   quorum: 2
+  baseUrl: https://models.github.ai/inference/
+  tokenEnvironment: GITHUB_TOKEN
   profiles:
     - id: verifier-profile-a
-      apiKeyEnvironment: ONE_CLI_VERIFIER_MODEL_A_API_KEY
       modelEnvironment: ONE_CLI_VERIFIER_MODEL_A
-      baseUrlEnvironment: ONE_CLI_VERIFIER_MODEL_A_BASE_URL
+      defaultModel: openai/gpt-4.1
     - id: verifier-profile-b
-      apiKeyEnvironment: ONE_CLI_VERIFIER_MODEL_B_API_KEY
       modelEnvironment: ONE_CLI_VERIFIER_MODEL_B
-      baseUrlEnvironment: ONE_CLI_VERIFIER_MODEL_B_BASE_URL
+      defaultModel: openai/gpt-4.1-mini
 
 limits:
   maxChangedFiles: 300

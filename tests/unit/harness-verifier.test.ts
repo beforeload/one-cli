@@ -32,13 +32,17 @@ describe("trusted independent verifier policy", () => {
   it("pins default branch, check producers, review actor, and two veto profiles", () => {
     const policy = loadVerifierPolicy(POLICY);
     expect(policy).toMatchObject({
-      schema: "one-cli.independent-verifier/v3",
+      schema: "one-cli.independent-verifier/v4",
       repository: { owner: "beforeload", name: "one-cli", defaultBranch: "main" },
-      requiredChecks: [{ name: "verify", appId: 15368 }],
-      emittedCheck: { name: "one-cli/independent-verifier" },
+      requiredChecks: [
+        { name: "verify", appId: 15368 },
+        { name: "one-cli/independent-verifier", appId: 15368 },
+      ],
+      emittedCheck: { name: "one-cli/independent-verifier", appId: 15368 },
       reviewIdentity: {
-        appSlug: "one-cli-verifier",
-        actor: "one-cli-verifier[bot]",
+        appId: 15368,
+        appSlug: "github-actions",
+        actor: "github-actions[bot]",
       },
       semanticReview: { quorum: 2 },
     });
@@ -129,14 +133,12 @@ describe("trusted independent verifier policy", () => {
     expect(prompt).not.toContain(secret);
   });
 
-  it("keeps local status read-only and fails readiness on misplaced verifier secrets", () => {
+  it("keeps local status read-only without verifier credential configuration", () => {
     const policy = loadVerifierPolicy(POLICY);
-    expect(inspectTrustedVerifier(ROOT, policy, [])).toMatchObject({
+    expect(inspectTrustedVerifier(ROOT, policy)).toMatchObject({
       ready: true,
       execution: "trusted-actions-only",
     });
-    expect(inspectTrustedVerifier(ROOT, policy, ["ONE_CLI_GITHUB_APP_PRIVATE_KEY_PATH"]))
-      .toMatchObject({ ready: false });
   });
 
   it("parses verifier-status values correctly and makes explicit run dry-run observable", () => {
@@ -164,9 +166,8 @@ describe("trusted independent verifier policy", () => {
     expect(fs.existsSync(home)).toBe(false);
   });
 
-  it("contains no local private-key loader or protection mutation path", () => {
+  it("contains no local verifier App module or protection mutation path", () => {
     const localSources = [
-      "harness/src/github-app.ts",
       "harness/src/index.ts",
       "harness/src/verifier.ts",
       "harness/src/release.ts",
@@ -184,6 +185,8 @@ describe("trusted independent verifier policy", () => {
     expect(governance).toContain("actualChecks.length === expectedChecks.length");
     expect(governance).toContain("dismiss_stale_reviews === true");
     expect(governance).toContain("require_last_push_approval === true");
+    expect(governance).toContain("can_approve_pull_request_reviews === true");
+    expect(governance).toContain('actions/permissions/workflow');
     expect(governance).toContain('workflow.value?.state === "active"');
   });
 });

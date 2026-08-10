@@ -10,27 +10,44 @@ const MAX_API_BYTES = 4 * 1024 * 1024;
 export async function main(argv = process.argv.slice(2), environment = process.env) {
   const options = parseOptions(argv);
   const trustedRoot = canonicalDirectory(options.trustedRoot, "trusted root");
-  const untrustedRoot = canonicalDirectory(options.untrustedRoot, "untrusted root");
-  if (trustedRoot === untrustedRoot || isWithin(trustedRoot, untrustedRoot) || isWithin(untrustedRoot, trustedRoot)) {
-    throw new Error("Trusted and untrusted checkouts must be separate roots");
-  }
   const verifierModule = await import(pathToFileURL(
     path.join(trustedRoot, "harness", "dist", "verifier.js"),
-  ).href);
-  const reviewModule = await import(pathToFileURL(
-    path.join(trustedRoot, "harness", "dist", "verifier-review.js"),
   ).href);
   const policy = verifierModule.loadVerifierPolicy(path.join(trustedRoot, options.policy));
   const event = readEvent(options.event);
   const binding = eventBinding(event);
   verifierModule.validatePinnedPull(policy, binding);
   assertCheckout(trustedRoot, binding.baseSha, "trusted default-branch checkout");
+  if (options.merge) {
+    const github = githubClient(environment, policy);
+    await assertInstallationIdentity(
+      github,
+      String(policy.reviewIdentity.appId),
+      policy.reviewIdentity.appSlug,
+    );
+    await waitForPinnedChecks(github, policy, binding, policy.requiredChecks, environment);
+    await assertMergePreconditions(github, policy, binding, environment);
+    await mergeExactHead(github, policy, binding);
+    process.stdout.write(`${JSON.stringify({
+      schema: "one-cli.independent-verifier/merge-v4",
+      merged: true,
+      pullNumber: binding.pullNumber,
+      baseSha: binding.baseSha,
+      headSha: binding.headSha,
+    })}\n`);
+    return 0;
+  }
+
+  const untrustedRoot = canonicalDirectory(options.untrustedRoot, "untrusted root");
+  if (trustedRoot === untrustedRoot || isWithin(trustedRoot, untrustedRoot) || isWithin(untrustedRoot, trustedRoot)) {
+    throw new Error("Trusted and untrusted checkouts must be separate roots");
+  }
+  const reviewModule = await import(pathToFileURL(
+    path.join(trustedRoot, "harness", "dist", "verifier-review.js"),
+  ).href);
   assertCheckout(untrustedRoot, binding.headSha, "untrusted pull-request checkout");
   assertGitObject(untrustedRoot, binding.baseSha);
   assertGitObject(untrustedRoot, binding.headSha);
-  const expectedMergeBase = exactSha(
-    git(untrustedRoot, ["merge-base", binding.baseSha, binding.headSha], 128).trim(),
-  );
   const changedPaths = changedPathInventory(
     untrustedRoot,
     binding.baseSha,
@@ -41,12 +58,10 @@ export async function main(argv = process.argv.slice(2), environment = process.e
   const protectedChange = changedPaths.some((candidate) =>
     verifierModule.isProtectedPath(policy, candidate)
   );
-  const fullDiff = protectedChange
-    ? exactDiff(untrustedRoot, binding.baseSha, binding.headSha, policy.limits.maxDiffBytes)
-    : undefined;
-  if (!options.apply) {
+  const fullDiff = exactDiff(untrustedRoot, binding.baseSha, binding.headSha, policy.limits.maxDiffBytes);
+  if (!options.verify) {
     process.stdout.write(`${JSON.stringify({
-      schema: "one-cli.independent-verifier/inspection-v3",
+      schema: "one-cli.independent-verifier/inspection-v4",
       applied: false,
       pullNumber: binding.pullNumber,
       baseRef: binding.baseRef,
@@ -54,71 +69,61 @@ export async function main(argv = process.argv.slice(2), environment = process.e
       headSha: binding.headSha,
       changedPaths,
       protectedChange,
-      fullDiffBytes: fullDiff === undefined ? 0 : Buffer.byteLength(fullDiff),
-      note: "Dry-run inspection cannot publish checks, reviews, or merge",
+      fullDiffBytes: Buffer.byteLength(fullDiff),
+      note: "Dry-run inspection cannot publish reviews or merge",
     }, null, 2)}\n`);
     return 0;
   }
 
-  const token = requiredEnvironment(environment, "VERIFIER_TOKEN");
-  const expectedAppId = positiveIntegerString(
-    requiredEnvironment(environment, policy.emittedCheck.appIdEnvironment),
-    "verifier App ID",
+  const github = githubClient(environment, policy);
+  await assertInstallationIdentity(
+    github,
+    String(policy.reviewIdentity.appId),
+    policy.reviewIdentity.appSlug,
   );
-  const github = new GitHubApi(
-    token,
-    environment.GITHUB_API_URL ?? "https://api.github.com",
-    policy.limits.requestTimeoutMs,
-  );
-  await assertInstallationIdentity(github, expectedAppId, policy.reviewIdentity.appSlug);
-  await assertStrictProtection(github, policy, binding);
   const marker = operationMarker(binding);
-  const check = await reserveCheck(github, policy, binding, expectedAppId, marker);
-  let conclusion = "failure";
-  let title = "Independent verification failed";
-  let summary = `${marker}\n\nIndependent verification failed closed before eligibility was established.`;
   try {
-    await waitForPinnedChecks(github, policy, binding, environment);
-    let semantic = [];
-    if (protectedChange) {
-      semantic = await semanticReviews(
+    const prerequisiteChecks = policy.requiredChecks.filter((check) =>
+      check.name !== policy.emittedCheck.name
+    );
+    await waitForPinnedChecks(github, policy, binding, prerequisiteChecks, environment);
+    const semantic = await semanticReviews(
+      policy,
+      binding,
+      changedPaths,
+      fullDiff,
+      reviewModule,
+      environment,
+    );
+    const quorum = reviewModule.requireTwoProfileVetoQuorum(
+      policy.semanticReview.profiles.map((profile) => profile.id),
+      semantic,
+    );
+    if (!quorum.eligible) {
+      const summary = boundedSummary(marker, {
+        result: "changes_requested",
+        baseSha: binding.baseSha,
+        headSha: binding.headSha,
+        protectedChange,
+        semanticVetoes: quorum.vetoes.map((result) => ({
+          profile: result.profile,
+          findings: result.findings,
+          summary: result.summary,
+        })),
+      });
+      await submitFinalReview(
+        github,
         policy,
         binding,
-        changedPaths,
-        fullDiff,
-        reviewModule,
+        marker,
+        "REQUEST_CHANGES",
+        summary,
+        prerequisiteChecks,
         environment,
       );
-      const quorum = reviewModule.requireTwoProfileVetoQuorum(
-        policy.semanticReview.profiles.map((profile) => profile.id),
-        semantic,
-      );
-      if (!quorum.eligible) {
-        summary = boundedSummary(marker, {
-          result: "changes_requested",
-          baseSha: binding.baseSha,
-          headSha: binding.headSha,
-          protectedChange,
-          semanticVetoes: quorum.vetoes.map((result) => ({
-            profile: result.profile,
-            findings: result.findings,
-            summary: result.summary,
-          })),
-        });
-        await revalidatePull(github, policy, binding);
-        await submitBoundReview(
-          github,
-          policy,
-          binding,
-          expectedAppId,
-          marker,
-          "REQUEST_CHANGES",
-          summary,
-        );
-        return 1;
-      }
+      return 1;
     }
-    summary = boundedSummary(marker, {
+    const summary = boundedSummary(marker, {
       result: "eligible",
       baseSha: binding.baseSha,
       headSha: binding.headSha,
@@ -131,54 +136,50 @@ export async function main(argv = process.argv.slice(2), environment = process.e
         summary: result.summary,
       })),
     });
-    await revalidatePull(github, policy, binding);
-    await waitForPinnedChecks(github, policy, binding, environment, 0);
-    await submitBoundReview(
+    await submitFinalReview(
       github,
       policy,
       binding,
-      expectedAppId,
       marker,
       "APPROVE",
       summary,
+      prerequisiteChecks,
+      environment,
     );
-    conclusion = "success";
-    title = "Independent verification passed";
-    await completeCheck(github, binding, check.id, conclusion, title, summary);
-    if (policy.merge.enabled) {
-      await waitForPinnedChecks(github, policy, binding, environment, 0);
-      await assertMergePreconditions(
-        github,
-        policy,
-        binding,
-        expectedMergeBase,
-      );
-      await mergeExactHead(github, policy, binding);
-    }
     process.stdout.write(`${JSON.stringify({
-      schema: "one-cli.independent-verifier/result-v3",
+      schema: "one-cli.independent-verifier/result-v4",
       applied: true,
       pullNumber: binding.pullNumber,
       baseSha: binding.baseSha,
       headSha: binding.headSha,
       protectedChange,
-      conclusion,
+      conclusion: "success",
     })}\n`);
     return 0;
   } catch (error) {
-    summary = boundedSummary(marker, {
+    const summary = boundedSummary(marker, {
       result: "failure",
       baseSha: binding.baseSha,
       headSha: binding.headSha,
       detail: safeError(error),
     });
-    throw error;
-  } finally {
-    if (conclusion !== "success") {
-      await completeCheck(github, binding, check.id, "failure", title, summary).catch((error) => {
-        process.stderr.write(`Unable to terminalize verifier check: ${safeError(error)}\n`);
+    const prerequisiteChecks = policy.requiredChecks.filter((check) =>
+      check.name !== policy.emittedCheck.name
+    );
+    await submitFinalReview(
+      github,
+      policy,
+      binding,
+      marker,
+      "REQUEST_CHANGES",
+      summary,
+      prerequisiteChecks,
+      environment,
+    )
+      .catch((reviewError) => {
+        process.stderr.write(`Unable to publish fail-closed review: ${safeError(reviewError)}\n`);
       });
-    }
+    throw error;
   }
 }
 
@@ -187,29 +188,33 @@ function parseOptions(argv) {
   let trustedRoot;
   let untrustedRoot;
   let policy = "harness/verifier-policy.yml";
-  let apply = false;
+  let verify = false;
+  let merge = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index];
     if (value === "--event") event = requiredArg(argv, ++index, value);
     else if (value === "--trusted-root") trustedRoot = requiredArg(argv, ++index, value);
     else if (value === "--untrusted-root") untrustedRoot = requiredArg(argv, ++index, value);
     else if (value === "--policy") policy = requiredArg(argv, ++index, value);
-    else if (value === "--apply") apply = true;
-    else if (value === "--dry-run") apply = false;
+    else if (value === "--verify") verify = true;
+    else if (value === "--merge") merge = true;
+    else if (value === "--dry-run") verify = false;
     else throw new Error(`Unknown verifier option: ${value}`);
   }
-  if (!event || !trustedRoot || !untrustedRoot) {
-    throw new Error("--event, --trusted-root, and --untrusted-root are required");
+  if (!event || !trustedRoot || (!merge && !untrustedRoot)) {
+    throw new Error("--event, --trusted-root, and verification --untrusted-root are required");
   }
+  if (verify && merge) throw new Error("--verify and --merge are mutually exclusive");
   if (path.isAbsolute(policy) || policy.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("--policy must be a canonical trusted-root-relative path");
   }
   return {
     event: path.resolve(event),
     trustedRoot: path.resolve(trustedRoot),
-    untrustedRoot: path.resolve(untrustedRoot),
+    untrustedRoot: untrustedRoot === undefined ? undefined : path.resolve(untrustedRoot),
     policy,
-    apply,
+    verify,
+    merge,
   };
 }
 
@@ -269,7 +274,14 @@ function exactDiff(root, baseSha, headSha, maxBytes) {
   return bytes.toString("utf8");
 }
 
-async function waitForPinnedChecks(github, policy, binding, environment, overrideWaitMs) {
+async function waitForPinnedChecks(
+  github,
+  policy,
+  binding,
+  requiredChecks,
+  environment,
+  overrideWaitMs,
+) {
   const waitMs = overrideWaitMs ?? numericEnvironment(
     environment,
     "ONE_CLI_VERIFY_WAIT_MS",
@@ -290,7 +302,7 @@ async function waitForPinnedChecks(github, policy, binding, environment, overrid
       throw new Error("Check-run inventory is truncated or exceeds its strict bound");
     }
     const pending = [];
-    for (const required of policy.requiredChecks) {
+    for (const required of requiredChecks) {
       const matches = response.check_runs.filter((candidate) => {
         const check = record(candidate, "required check");
         const app = record(check.app, "required check App");
@@ -316,17 +328,14 @@ async function waitForPinnedChecks(github, policy, binding, environment, overrid
 }
 
 async function semanticReviews(policy, binding, changedPaths, diff, reviewModule, environment) {
+  const token = requiredEnvironment(environment, policy.semanticReview.tokenEnvironment);
+  const baseUrl = httpsOrigin(policy.semanticReview.baseUrl);
   const configured = policy.semanticReview.profiles.map((profile) => ({
     profile,
-    apiKey: requiredEnvironment(environment, profile.apiKeyEnvironment),
-    model: requiredEnvironment(environment, profile.modelEnvironment),
-    baseUrl: httpsOrigin(requiredEnvironment(environment, profile.baseUrlEnvironment)),
+    model: optionalEnvironment(environment, profile.modelEnvironment, profile.defaultModel),
   }));
-  if (
-    configured[0].apiKey === configured[1].apiKey ||
-    (configured[0].model === configured[1].model && configured[0].baseUrl === configured[1].baseUrl)
-  ) {
-    throw new Error("Semantic verifier profiles must use independent credentials and model endpoints");
+  if (configured[0].model === configured[1].model) {
+    throw new Error("Semantic verifier profiles must use two distinct GitHub Models IDs");
   }
   const prompt = reviewModule.semanticVetoPrompt({
     repository: binding.repository,
@@ -336,7 +345,7 @@ async function semanticReviews(policy, binding, changedPaths, diff, reviewModule
     changedPaths,
     diff,
   });
-  return await Promise.all(configured.map(async ({ profile, apiKey, model, baseUrl }) => {
+  return await Promise.all(configured.map(async ({ profile, model }) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), policy.limits.requestTimeoutMs);
     try {
@@ -345,7 +354,7 @@ async function semanticReviews(policy, binding, changedPaths, diff, reviewModule
         redirect: "error",
         signal: controller.signal,
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -377,7 +386,25 @@ async function semanticReviews(policy, binding, changedPaths, diff, reviewModule
   }));
 }
 
-async function revalidatePull(github, policy, binding) {
+async function revalidatePull(github, policy, binding, requireMergeable = false) {
+  const expectedRepository = `${policy.repository.owner}/${policy.repository.name}`;
+  if (
+    binding.repository !== expectedRepository ||
+    binding.baseRepository !== expectedRepository ||
+    binding.baseRef !== policy.repository.defaultBranch
+  ) {
+    throw new Error("Pinned event repository or default branch differs from verifier policy");
+  }
+  const repository = record(
+    await github.request("GET", `/repos/${binding.repository}`),
+    "current repository",
+  );
+  if (
+    repository.full_name !== expectedRepository ||
+    repository.default_branch !== policy.repository.defaultBranch
+  ) {
+    throw new Error("Repository identity or default branch changed before privileged verifier write");
+  }
   const current = record(
     await github.request("GET", `/repos/${binding.repository}/pulls/${binding.pullNumber}`),
     "current pull request",
@@ -386,22 +413,39 @@ async function revalidatePull(github, policy, binding) {
   const head = record(current.head, "current pull head");
   const baseRepository = record(base.repo, "current base repository");
   const currentBinding = {
-    repository: binding.repository,
+    repository: expectedRepository,
     baseRepository: nonEmptyString(baseRepository.full_name, "current base repository"),
     baseRef: nonEmptyString(base.ref, "current base ref"),
     baseSha: exactSha(nonEmptyString(base.sha, "current base SHA")),
     headSha: exactSha(nonEmptyString(head.sha, "current head SHA")),
   };
   if (
-    currentBinding.repository !== `${policy.repository.owner}/${policy.repository.name}` ||
-    currentBinding.baseRepository !== binding.baseRepository ||
-    currentBinding.baseRef !== binding.baseRef ||
+    currentBinding.repository !== binding.repository ||
+    currentBinding.baseRepository !== expectedRepository ||
+    currentBinding.baseRef !== policy.repository.defaultBranch ||
     currentBinding.baseSha !== binding.baseSha ||
     currentBinding.headSha !== binding.headSha ||
     current.state !== "open" ||
-    current.draft === true
+    current.draft === true ||
+    (requireMergeable && current.mergeable !== true)
   ) {
     throw new Error("Pull request binding changed before privileged verifier write");
+  }
+  const branch = record(
+    await github.request(
+      "GET",
+      `/repos/${binding.repository}/branches/${
+        encodeURIComponent(binding.baseRef)
+      }`,
+    ),
+    "current default branch",
+  );
+  const branchCommit = record(branch.commit, "current default branch head");
+  if (
+    branch.name !== policy.repository.defaultBranch ||
+    branchCommit.sha !== binding.baseSha
+  ) {
+    throw new Error("Default branch advanced after verification; a new workflow run is required");
   }
 }
 
@@ -410,108 +454,45 @@ export async function assertInstallationIdentity(github, expectedAppId, expected
   if (String(installation.app_id) !== expectedAppId || installation.app_slug !== expectedSlug) {
     throw new Error("Verifier token identity does not match the pinned App ID and slug");
   }
-  const permissions = record(installation.permissions, "App installation permissions");
-  const expectedPermissions = {
-    checks: "write",
-    contents: "read",
-    metadata: "read",
-    pull_requests: "write",
-  };
-  if (
-    JSON.stringify(Object.keys(permissions).sort()) !==
-      JSON.stringify(Object.keys(expectedPermissions).sort()) ||
-    Object.entries(expectedPermissions).some(([name, access]) => permissions[name] !== access)
-  ) {
-    throw new Error(
-      "Verifier App permissions must be exactly checks:write, pull_requests:write, " +
-        "contents:read, metadata:read",
-    );
-  }
 }
 
-async function assertStrictProtection(github, policy, binding) {
-  const protection = record(
-    await github.request(
-      "GET",
-      `/repos/${binding.repository}/branches/${
-        encodeURIComponent(policy.repository.defaultBranch)
-      }/protection`,
-    ),
-    "default branch protection",
+async function submitFinalReview(
+  github,
+  policy,
+  binding,
+  marker,
+  event,
+  body,
+  requiredChecks,
+  environment,
+) {
+  await waitForPinnedChecks(
+    github,
+    policy,
+    binding,
+    requiredChecks,
+    environment,
+    0,
   );
-  const status = record(protection.required_status_checks, "required status checks");
-  if (status.strict !== true) {
-    throw new Error("Default branch protection must require strict up-to-date status checks");
-  }
-}
-
-async function reserveCheck(github, policy, binding, expectedAppId, marker) {
-  const inventory = record(
-    await github.request(
-      "GET",
-      `/repos/${binding.repository}/commits/${binding.headSha}/check-runs?per_page=100`,
-    ),
-    "check-run inventory",
+  await submitBoundReview(
+    github,
+    policy,
+    binding,
+    marker,
+    event,
+    body,
+    () => revalidatePull(github, policy, binding),
   );
-  if (
-    !Array.isArray(inventory.check_runs) ||
-    nonNegativeInteger(inventory.total_count, "verifier check count") !== inventory.check_runs.length ||
-    inventory.check_runs.length >= 100
-  ) {
-    throw new Error("Verifier check inventory is malformed or truncated");
-  }
-  const matches = inventory.check_runs.filter((candidate) => {
-    const check = record(candidate, "verifier check");
-    const app = record(check.app, "verifier check App");
-    return check.name === policy.emittedCheck.name &&
-      String(app.id) === expectedAppId &&
-      check.external_id === marker;
-  });
-  if (matches.length > 1) throw new Error("Duplicate exact verifier operation checks exist");
-  if (matches[0]) {
-    const check = record(matches[0], "existing verifier check");
-    const id = positiveInteger(check.id, "verifier check ID");
-    await github.request("PATCH", `/repos/${binding.repository}/check-runs/${id}`, {
-      status: "in_progress",
-      started_at: new Date().toISOString(),
-      output: {
-        title: "Independent verification running",
-        summary: `${marker}\n\nRevalidating exact base/head binding.`,
-      },
-    });
-    return { id };
-  }
-  const created = record(await github.request("POST", `/repos/${binding.repository}/check-runs`, {
-    name: policy.emittedCheck.name,
-    head_sha: binding.headSha,
-    external_id: marker,
-    status: "in_progress",
-    started_at: new Date().toISOString(),
-    output: {
-      title: "Independent verification running",
-      summary: `${marker}\n\nValidating exact base/head binding.`,
-    },
-  }), "created verifier check");
-  return { id: positiveInteger(created.id, "created verifier check ID") };
-}
-
-async function completeCheck(github, binding, checkId, conclusion, title, summary) {
-  await github.request("PATCH", `/repos/${binding.repository}/check-runs/${checkId}`, {
-    status: "completed",
-    conclusion,
-    completed_at: new Date().toISOString(),
-    output: { title, summary },
-  });
 }
 
 async function submitBoundReview(
   github,
   policy,
   binding,
-  expectedAppId,
   marker,
   event,
   body,
+  beforeReview,
 ) {
   const reviews = await github.request(
     "GET",
@@ -538,8 +519,10 @@ async function submitBoundReview(
     ) {
       throw new Error("Existing verifier review conflicts with the exact operation");
     }
+    await beforeReview();
     return;
   }
+  await beforeReview();
   const created = record(await github.request(
     "POST",
     `/repos/${binding.repository}/pulls/${binding.pullNumber}/reviews`,
@@ -553,17 +536,47 @@ async function submitBoundReview(
   ) {
     throw new Error("Created review is not bound to the pinned verifier actor and SHA");
   }
-  void expectedAppId;
+}
+
+export async function assertBoundApproval(github, policy, binding) {
+  const reviews = await github.request(
+    "GET",
+    `/repos/${binding.repository}/pulls/${binding.pullNumber}/reviews?per_page=100`,
+  );
+  if (!Array.isArray(reviews) || reviews.length >= 100) {
+    throw new Error("Pull review inventory is malformed or exceeds its strict bound");
+  }
+  const marker = operationMarker(binding);
+  const matches = reviews.filter((candidate) => {
+    const review = record(candidate, "pull review");
+    const actor = record(review.user, "review actor");
+    return review.state === "APPROVED" &&
+      review.commit_id === binding.headSha &&
+      actor.login === policy.reviewIdentity.actor &&
+      actor.type === "Bot" &&
+      typeof review.body === "string" &&
+      review.body.includes(marker);
+  });
+  if (matches.length !== 1) {
+    throw new Error("Exact head lacks one pinned github-actions[bot] approval");
+  }
 }
 
 export async function assertMergePreconditions(
   github,
   policy,
   binding,
-  expectedMergeBase,
+  environment = {},
 ) {
-  await assertStrictProtection(github, policy, binding);
-  await revalidatePull(github, policy, binding);
+  await waitForPinnedChecks(
+    github,
+    policy,
+    binding,
+    policy.requiredChecks,
+    environment,
+    0,
+  );
+  await assertBoundApproval(github, policy, binding);
   const comparison = record(
     await github.request(
       "GET",
@@ -572,22 +585,10 @@ export async function assertMergePreconditions(
     "base/head comparison",
   );
   const mergeBase = record(comparison.merge_base_commit, "merge-base commit");
-  if (mergeBase.sha !== expectedMergeBase) {
-    throw new Error("Expected merge base changed before merge");
+  if (mergeBase.sha !== binding.baseSha) {
+    throw new Error("Pull request head is not exactly up to date with the verified base");
   }
-  const branch = record(
-    await github.request(
-      "GET",
-      `/repos/${binding.repository}/branches/${
-        encodeURIComponent(policy.repository.defaultBranch)
-      }`,
-    ),
-    "default branch",
-  );
-  const branchCommit = record(branch.commit, "default branch head");
-  if (branchCommit.sha !== binding.baseSha) {
-    throw new Error("Default branch advanced after verification; a new workflow run is required");
-  }
+  await revalidatePull(github, policy, binding, true);
 }
 
 async function mergeExactHead(github, policy, binding) {
@@ -602,7 +603,7 @@ async function mergeExactHead(github, policy, binding) {
 }
 
 function operationMarker(binding) {
-  return `one-cli-independent-verifier:v3:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
+  return `one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
 }
 
 function boundedSummary(marker, value) {
@@ -647,6 +648,14 @@ class GitHubApi {
       clearTimeout(timer);
     }
   }
+}
+
+function githubClient(environment, policy) {
+  return new GitHubApi(
+    requiredEnvironment(environment, "GITHUB_TOKEN"),
+    environment.GITHUB_API_URL ?? "https://api.github.com",
+    policy.limits.requestTimeoutMs,
+  );
 }
 
 async function boundedJson(response, maxBytes, label) {
@@ -768,17 +777,21 @@ function requiredEnvironment(environment, name) {
   return value;
 }
 
+function optionalEnvironment(environment, name, fallback) {
+  const value = environment[name];
+  if (value === undefined || value === "") return fallback;
+  if (typeof value !== "string" || !value.trim() || value.includes("\0")) {
+    throw new Error(`${name} is invalid`);
+  }
+  return value;
+}
+
 function numericEnvironment(environment, name, fallback) {
   if (environment[name] === undefined) return fallback;
   const value = Number(environment[name]);
   if (!Number.isSafeInteger(value) || value < 0 || value > 30 * 60_000) {
     throw new Error(`${name} is invalid`);
   }
-  return value;
-}
-
-function positiveIntegerString(value, label) {
-  if (!/^[1-9][0-9]*$/u.test(value)) throw new Error(`${label} must be a positive decimal integer`);
   return value;
 }
 
@@ -831,7 +844,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exitCode = await main();
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
-      schema: "one-cli.independent-verifier/error-v3",
+      schema: "one-cli.independent-verifier/error-v4",
       error: safeError(error),
     })}\n`);
     process.exitCode = 1;

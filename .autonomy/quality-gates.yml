@@ -17,6 +17,7 @@ localCommands:
 githubChecks:
   required:
     - verify
+    - one-cli/independent-verifier
 
 branch:
   requireCleanWorktree: true

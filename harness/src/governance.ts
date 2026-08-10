@@ -28,7 +28,6 @@ interface ReadinessInput {
     readonly defaultBranch: string;
   };
   readonly policy: IndependentVerifierPolicy;
-  readonly verifierAppId?: string;
 }
 
 interface ApiResult {
@@ -51,7 +50,14 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
       .split("/")
       .map(encodeURIComponent)
       .join("/");
-    const [repoResult, workflowResult, contentResult, protectionResult, installationResult] =
+    const [
+      repoResult,
+      workflowResult,
+      contentResult,
+      actionsWorkflowResult,
+      protectionResult,
+      installationResult,
+    ] =
       await Promise.all([
         this.get(repositoryPath, signal),
         this.get(
@@ -66,6 +72,7 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
           }`,
           signal,
         ),
+        this.get(`${repositoryPath}/actions/permissions/workflow`, signal),
         this.get(`${defaultBranchPath}/protection`, signal),
         this.get("installation", signal),
       ]);
@@ -138,6 +145,21 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         : content.error ?? "Pinned workflow does not declare the expected verifier policy version",
     );
 
+    const actionsWorkflow = resultRecord(
+      actionsWorkflowResult,
+      "Actions workflow permissions",
+    );
+    const actionsApprovalOk =
+      actionsWorkflow.value?.can_approve_pull_request_reviews === true;
+    add(
+      "actions-can-approve-pull-request-reviews",
+      actionsApprovalOk,
+      actionsApprovalOk
+        ? "GitHub Actions may approve pull request reviews"
+        : actionsWorkflow.error ??
+          "Repository Actions workflows cannot approve pull request reviews",
+    );
+
     const protection = resultRecord(protectionResult, "branch protection");
     const status = nestedRecord(protection.value, "required_status_checks");
     const reviews = nestedRecord(protection.value, "required_pull_request_reviews");
@@ -177,33 +199,17 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         : protection.error ?? deletions.error ?? "Branch deletions are not explicitly disabled",
     );
 
-    const verifierAppId = parseAppId(this.input.verifierAppId);
-    add(
-      "verifier-app-id",
-      verifierAppId !== undefined,
-      verifierAppId === undefined
-        ? "ONE_CLI_VERIFIER_APP_ID must pin the verifier App"
-        : String(verifierAppId),
-    );
-    const expectedChecks = [
-      ...policy.requiredChecks,
-      ...(verifierAppId === undefined
-        ? []
-        : [{ name: policy.emittedCheck.name, appId: verifierAppId }]),
-    ];
+    const expectedChecks = [...policy.requiredChecks];
     const actualChecks = Array.isArray(status.value?.checks)
       ? status.value.checks
         .map((value) => record(value))
         .filter((value): value is Record<string, unknown> => value !== undefined)
       : [];
-    for (const expected of [
-      ...policy.requiredChecks,
-      { name: policy.emittedCheck.name, appId: verifierAppId },
-    ]) {
+    for (const expected of policy.requiredChecks) {
       const matches = actualChecks.filter((candidate) =>
         candidate.context === expected.name && candidate.app_id === expected.appId
       );
-      const ok = expected.appId !== undefined && matches.length === 1;
+      const ok = matches.length === 1;
       add(
         expected.name === policy.emittedCheck.name
           ? "required-check-independent-verifier"
@@ -211,9 +217,7 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
         ok,
         ok
           ? `${expected.name} is pinned to App ${String(expected.appId)}`
-          : `Required check ${expected.name} is not uniquely pinned to App ${
-            String(expected.appId ?? "unconfigured")
-          }`,
+          : `Required check ${expected.name} is not uniquely pinned to App ${String(expected.appId)}`,
       );
     }
     const checksExact =
@@ -263,13 +267,15 @@ export class GhGovernanceReadinessPort implements GovernanceReadinessPort {
 
     const installation = resultRecord(installationResult, "runtime installation");
     const permissions = nestedRecord(installation.value, "permissions");
-    const noProtectionWrite = permissions.value?.administration !== "write";
+    const protectionReadOnly = permissions.value?.administration === "read";
     add(
       "runtime-no-protection-write",
-      noProtectionWrite && installation.value !== undefined,
-      noProtectionWrite && installation.value !== undefined
-        ? "runtime identity has no administration:write permission"
-        : installation.error ?? permissions.error ?? "Runtime identity can modify repository protection",
+      protectionReadOnly && installation.value !== undefined,
+      protectionReadOnly && installation.value !== undefined
+        ? "runtime identity has administration:read and no administration:write"
+        : installation.error ??
+          permissions.error ??
+          "Runtime identity must have read-only repository administration permission",
     );
 
     return {
@@ -331,12 +337,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
-}
-
-function parseAppId(value: string | undefined): number | undefined {
-  if (!value || !/^[1-9][0-9]*$/u.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function message(error: unknown): string {

@@ -19,8 +19,7 @@ node harness/dist/index.js run --once --workspace "$PWD"
 `run` remains the applied product loop for launchd, while explicit
 `run --dry-run` exits after read-only verifier configuration inspection without
 starting subprocesses, taking a lock, appending the journal, or writing GitHub.
-`verifier-status` is also local and read-only; it never authenticates as the
-Verifier App.
+`verifier-status` is also local and read-only.
 Do not use `--apply` until the governance bootstrap is merged and reviewed.
 
 The governance bootstrap is an explicit operator procedure. Its PR reports its
@@ -32,12 +31,42 @@ required checks:
 - `verify`;
 - `one-cli/independent-verifier`.
 
-Pin `verify` to the GitHub Actions App ID and
-`one-cli/independent-verifier` to the dedicated Verifier App ID where GitHub's
-branch-protection API supports App restrictions. Enable strict checks and admin
+Pin both `verify` and `one-cli/independent-verifier` to the built-in GitHub
+Actions App ID `15368`. Enable strict checks and admin
 enforcement, disable force pushes and deletions, dismiss stale reviews, require
 last-push approval and at least one approval, and require no checks beyond the
-two pinned checks. Require the review actor `one-cli-verifier[bot]`.
+two pinned checks. Enable the repository Actions setting that permits workflows
+to approve pull request reviews, and require the review actor
+`github-actions[bot]`. An owner can apply the one-time bootstrap explicitly:
+
+```bash
+gh api --method PUT repos/beforeload/one-cli/actions/permissions/workflow \
+  -f default_workflow_permissions=read \
+  -F can_approve_pull_request_reviews=true
+
+gh api --method PUT repos/beforeload/one-cli/branches/main/protection \
+  --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [
+      { "context": "verify", "app_id": 15368 },
+      { "context": "one-cli/independent-verifier", "app_id": 15368 }
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_last_push_approval": true,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
 `protected-paths` remains a non-required
 informational job. Runtime code never removes, restores, or otherwise lowers
 these rules. Applied seeding requires
@@ -76,29 +105,23 @@ OPENAI_MODEL=replace-on-host
 ONE_CLI_GH_EXECUTABLE=/opt/homebrew/bin/gh
 GH_TOKEN=replace-with-least-privilege-builder-installation-token
 ONE_CLI_BUILDER_APP_ID=replace-with-builder-app-id
-ONE_CLI_VERIFIER_APP_ID=replace-with-public-decimal-app-id
 EOF
 ```
 
 The local GitHub credential must be an installation token for the pinned
 `ONE_CLI_BUILDER_APP_ID`. Before any applied `run` or `seed`, the harness calls
 the read-only `/installation` endpoint and requires `contents`, `issues`, and
-`pull_requests` write while rejecting administration, checks, Actions,
-workflow, variable, and secret write authority. An owner OAuth login is not an
+`pull_requests` write plus `administration:read`, while rejecting
+administration, checks, Actions, workflow, variable, and secret write authority.
+The administration read grant is used only to inspect Actions workflow settings
+and branch protection before product execution. An owner OAuth login is not an
 accepted fallback.
 
-The non-secret Verifier App ID is duplicated locally only so `doctor` can pin
-remote branch protection and App identity. Verifier App and semantic-model secrets must be GitHub Actions secrets. They
-must never appear in `$ONE_CLI_HARNESS_ENV_FILE`, `$ONE_CLI_HOME`, launchd, or a
-local process environment. The local harness strips recognized verifier names
-from worker and builder environments and `doctor` fails closed when it finds
-one. Local builds use a strict credential-free environment. The local builder
-GitHub identity must be least privilege and must not have checks, review,
-administration, ruleset, or branch-protection authority.
-
-The Verifier App permissions must be exactly `checks:write`,
-`pull_requests:write`, `contents:read`, and `metadata:read`; any additional
-permission fails closed.
+The independent verifier has no local key, custom App, or repository secret.
+GitHub Actions supplies an ephemeral `GITHUB_TOKEN` as the built-in App identity.
+The local builder GitHub identity must remain least privilege and must not have
+checks, review, administration-write, ruleset-write, or branch-protection-write
+authority.
 Branch-protection bootstrap remains an operator action;
 no runtime or verifier code has an endpoint that changes protection.
 
@@ -107,15 +130,15 @@ no runtime or verifier code has an endpoint that changes protection.
 `.github/workflows/independent-verifier.yml` runs on `pull_request_target` for
 every normal and protected PR. GitHub supplies workflow text from the trusted
 default branch. The job checks out the exact event base SHA into `trusted/`,
-installs and builds only that trusted tree without secrets, and checks out the
+installs and builds only that trusted tree, and checks out the
 PR head separately into `untrusted/` with persisted credentials disabled. No
-file or command from `untrusted/` is executed. Verifier App and model secrets
-are provided only to the final trusted script step.
+file or command from `untrusted/` is executed. The required first job is named
+`one-cli/independent-verifier`; it receives only the ephemeral workflow token.
 
 `harness/verifier-policy.yml` pins the base repository, default branch, trusted
 workflow path, Git blob SHA and policy version, required `verify` check name and
-GitHub Actions App ID, emitted check name, review App
-slug/actor, protected paths, bounds, merge method, and exactly two independent
+GitHub Actions App ID `15368`, emitted check name and App ID, review actor
+`github-actions[bot]`, protected paths, bounds, merge method, and exactly two
 semantic profiles. The workflow emits `one-cli/independent-verifier` for every
 PR. Normal paths become deterministically eligible only after the exact head's
 pinned `verify` check succeeds.
@@ -125,19 +148,25 @@ and head commit objects. Their complete binary/full-index diff also comes from
 those local objects, never GitHub's REST patch field. Missing objects, malformed
 paths, duplicate or wrong-App checks, oversized evidence, or any command
 truncation fails closed. Immediately before review and again before exact-head
-merge, the script re-fetches the PR and requires the same base repository,
-default branch, base SHA, and head SHA. Immediately before merge it also
-re-reads strict protection, the default-branch head, and the expected merge
-base. Base advancement fails and relies on the resulting new workflow run.
+merge, the script re-fetches the repository `default_branch`, PR, and
+default-branch head and requires the same repository, default branch, base SHA,
+and head SHA. It also revalidates exact-head check App provenance before review,
+and exact-head check App and approval actor/commit provenance before merge.
+Base advancement fails and relies on the resulting new workflow run.
 
-Two independent model profiles receive bounded, secret-redacted diff evidence
-as untrusted data and return strict JSON. Models are veto-only: deterministic
+Two independent profiles with distinct GitHub Models IDs use the same ephemeral workflow token and
+receive bounded, secret-redacted diff evidence as untrusted data. Repository
+variables may select model IDs; safe distinct defaults require no setup.
+Responses are strict JSON. Models are veto-only: deterministic
 gates establish eligibility, while either veto rejects it; model text can never
 authorize a merge. Malformed output or profile collapse fails closed. The App
-submits a `commit_id`-bound review, validates the pinned bot actor, publishes an
-App-bound check operation, and merges with GitHub's atomic `sha` precondition.
-Stale heads naturally receive separate terminal checks and cannot block
-rediscovery of a new head.
+submits a `commit_id`-bound review and validates the pinned bot actor. Only after
+that required job has completed successfully does a second job revalidate the
+exact repository, PR, checks, review, base, default-branch head, and
+mergeability, then merge with GitHub's atomic `sha` precondition. The workflow
+token never reads branch-protection or ruleset APIs; the local governance
+readiness port proves the full protection contract before product execution,
+while GitHub's merge API enforces the live rules.
 
 ## Delivery behavior
 

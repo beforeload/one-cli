@@ -52,9 +52,8 @@ Research, triage, and dogfood create Issues; they do not fix findings inline.
    `npm run typecheck`, `npm test`, `npm run test:integration`, and the
    configured smoke command.
 5. Require the GitHub checks named `verify` and
-   `one-cli/independent-verifier`, pinned to their expected GitHub
-   Actions/Verifier App identities where supported, plus a SHA-bound review by
-   the dedicated Verifier App before merge.
+   `one-cli/independent-verifier`, both pinned to the built-in GitHub Actions
+   App ID `15368`, plus a SHA-bound `github-actions[bot]` review before merge.
 6. Reconcile the generated merge commit and run targeted post-merge dogfood on
    changed user paths before releasing the lease or closing the source Issue.
 7. Fingerprint code failures by operation, exit code, and normalized error.
@@ -94,15 +93,22 @@ between pinned base and head objects; REST patch text is not authoritative.
 Labels, issue text, pull text, worker self-review, and model output never grant
 an exception. After the one-time exact-SHA bootstrap, branch protection
 requires exactly `verify` and `one-cli/independent-verifier`;
-`protected-paths` is non-required informational evidence.
+`protected-paths` is non-required informational evidence. Repository Actions
+must be allowed to approve pull request reviews. Local governance readiness
+must prove strict status checks, admin enforcement, disabled force pushes and
+deletions, exact App-pinned checks, stale-review dismissal, at least one
+approval, and last-push approval before product execution.
 
-The Verifier App and two independent semantic-review profiles are unavailable
-to the local harness, worker, and builder. Models are veto-only with 2-of-2
-non-veto required; deterministic checks alone establish eligibility. The App
-submits an exact-head review and check, revalidates base repository, default
-branch, base SHA, and head SHA immediately before privileged writes, and merges
-with an exact-SHA precondition. It must not have repository administration write
-permission and no runtime path may change or lower branch protection.
+The verifier uses GitHub's ephemeral workflow token and built-in GitHub Actions
+App identity; there is no custom App, local verifier key, or repository secret.
+Two distinct GitHub Models profiles use that token and are veto-only with 2-of-2
+non-veto required; deterministic checks alone establish eligibility. The first
+job submits an exact-head review and must complete before a second job
+revalidates repository identity and `default_branch`, the live default-branch
+head, base SHA, head SHA, required-check App provenance, review actor/commit,
+and mergeability, then merges with an exact-SHA precondition. The workflow token
+does not call branch-protection or ruleset APIs; GitHub's merge API enforces the
+live protection rules. No runtime path may change or lower branch protection.
 
 Tracked content must not contain credentials, tokens, host-private paths,
 runtime ledgers, checkpoints, task identifiers, or reporting endpoints.

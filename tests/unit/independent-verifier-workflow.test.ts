@@ -16,20 +16,33 @@ describe("independent verifier trusted workflow", () => {
     expect(workflow).toContain("path: trusted");
     expect(workflow).toContain("ref: refs/pull/${{ github.event.pull_request.number }}/head");
     expect(workflow).toContain("path: untrusted");
-    expect(workflow.match(/persist-credentials: false/gu)).toHaveLength(2);
+    expect(workflow.match(/persist-credentials: false/gu)).toHaveLength(3);
     expect(workflow).toContain('node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"');
     expect(workflow).not.toMatch(/working-directory:\s*untrusted/u);
+    expect(workflow).toContain("name: one-cli/independent-verifier");
   });
 
-  it("confines App/model secrets to the final trusted step and pins the token action", () => {
-    expect(workflow).toContain(
-      "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+  it("uses only ephemeral built-in identity with least-privilege per-job permissions", () => {
+    expect(workflow).not.toMatch(/create-github-app-token|PRIVATE_KEY|secrets\.|VERIFIER_TOKEN/u);
+    expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/gu)).toHaveLength(2);
+    expect(workflow).toMatch(
+      /verifier:[\s\S]*?permissions:\n\s+contents: read\n\s+checks: read\n\s+pull-requests: write\n\s+models: read/u,
     );
-    expect(workflow.indexOf("ONE_CLI_VERIFIER_MODEL_A_API_KEY"))
-      .toBeGreaterThan(workflow.indexOf("Verify exact pull and publish App evidence"));
-    expect(workflow.indexOf("ONE_CLI_VERIFIER_APP_PRIVATE_KEY"))
-      .toBeGreaterThan(workflow.indexOf("Mint independent verifier App token"));
-    expect(workflow).toContain("permissions:\n  contents: read");
+    expect(workflow).toMatch(
+      /merge:[\s\S]*?permissions:\n\s+contents: write\n\s+checks: read\n\s+pull-requests: read/u,
+    );
+    expect(workflow).not.toContain("checks: write");
+    expect(workflow).not.toContain("administration:");
+  });
+
+  it("uses two distinct GitHub Models defaults without repository secrets", () => {
+    expect(workflow).toContain("'openai/gpt-4.1'");
+    expect(workflow).toContain("'openai/gpt-4.1-mini'");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_A");
+    expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_B");
+    expect(workflow).not.toMatch(/MODEL_[AB]_(?:API_KEY|BASE_URL)/u);
+    expect(script).toContain("const semantic = await semanticReviews(");
+    expect(script).not.toContain("if (protectedChange)");
   });
 
   it("uses exact git objects and fails closed instead of accepting REST patches", () => {
@@ -41,71 +54,129 @@ describe("independent verifier trusted workflow", () => {
     expect(script).toContain("Git evidence exceeds its strict byte bound");
   });
 
-  it("pins check/review provenance and revalidates before approval and exact-head merge", () => {
+  it("pins built-in check/review provenance and revalidates exact base/head", () => {
     expect(script).toContain("required.appId");
     expect(script).toContain("actor.login !== policy.reviewIdentity.actor");
     expect(script).toContain("commit_id: binding.headSha");
-    expect(script).toContain("await revalidatePull(github, policy, binding)");
+    expect(script).toContain("() => revalidatePull(github, policy, binding)");
     expect(script).toContain("{ sha: binding.headSha, merge_method: policy.merge.method }");
-    expect(script.match(/await revalidatePull\(github, policy, binding\)/gu)?.length ?? 0)
+    expect(script.match(/revalidatePull\(github, policy, binding/gu)?.length ?? 0)
       .toBeGreaterThanOrEqual(3);
+    expect(script).toContain("Exact head lacks one pinned github-actions[bot] approval");
   });
 
-  it("terminalizes rejection and gives each rediscovered head a distinct operation", () => {
-    expect(script).toContain(
-      "`one-cli-independent-verifier:v3:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`",
+  it("never calls branch-protection or ruleset endpoints from the trusted workflow token", () => {
+    expect(script).not.toMatch(/branches\/[^/]+\/protection|\/rulesets/u);
+    expect(script).not.toContain("assertStrictProtection");
+  });
+
+  it("performs final live binding reads after waits and immediately before writes", () => {
+    const finalReview = script.slice(
+      script.indexOf("async function submitFinalReview"),
+      script.indexOf("async function submitBoundReview"),
     );
-    expect(script).toContain("external_id: marker");
-    expect(script).toContain('status: "completed"');
-    expect(script).toContain('conclusion !== "success"');
-    expect(script).toContain('status: "in_progress"');
+    expect(finalReview.indexOf("waitForPinnedChecks")).toBeLessThan(
+      finalReview.indexOf("revalidatePull"),
+    );
+    expect(finalReview).toContain("() => revalidatePull(github, policy, binding)");
+    expect(finalReview.trimEnd().endsWith(");\n}")).toBe(true);
+
+    const mergePreconditions = script.slice(
+      script.indexOf("export async function assertMergePreconditions"),
+      script.indexOf("async function mergeExactHead"),
+    );
+    expect(mergePreconditions.indexOf("waitForPinnedChecks")).toBeLessThan(
+      mergePreconditions.indexOf("assertBoundApproval"),
+    );
+    expect(mergePreconditions.trimEnd().endsWith(
+      "await revalidatePull(github, policy, binding, true);\n}",
+    )).toBe(true);
   });
 
-  it("is dry-run inspection by default and cannot mint, review, check, or merge locally", () => {
-    const dryRun = script.indexOf("if (!options.apply)");
-    const tokenRead = script.indexOf('requiredEnvironment(environment, "VERIFIER_TOKEN")');
-    const checkWrite = script.indexOf("reserveCheck(github");
+  it("gives every head a distinct SHA-bound review operation", () => {
+    expect(script).toContain(
+      "`one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`",
+    );
+    expect(script).toContain('"REQUEST_CHANGES"');
+    expect(script).toContain('"APPROVE"');
+  });
+
+  it("is dry-run inspection by default and cannot review or merge locally", () => {
+    const dryRun = script.indexOf("if (!options.verify)");
+    const tokenRead = script.indexOf("const github = githubClient(environment, policy)", dryRun);
+    const reviewWrite = script.indexOf("await submitFinalReview(", tokenRead);
     expect(dryRun).toBeGreaterThan(0);
     expect(tokenRead).toBeGreaterThan(dryRun);
-    expect(checkWrite).toBeGreaterThan(tokenRead);
+    expect(reviewWrite).toBeGreaterThan(tokenRead);
   });
 
-  it("rejects any verifier App permission beyond the exact least-privilege set", async () => {
+  it("rejects a token not issued by the built-in GitHub Actions App", async () => {
     const verifier = await verifierModule();
     const github = {
       request: async () => ({
         app_id: 4242,
         app_slug: "one-cli-verifier",
-        permissions: {
-          checks: "write",
-          contents: "read",
-          metadata: "read",
-          pull_requests: "write",
-          actions: "read",
-        },
       }),
     };
     await expect(verifier.assertInstallationIdentity(
       github,
-      "4242",
-      "one-cli-verifier",
-    )).rejects.toThrow("permissions must be exactly");
+      "15368",
+      "github-actions",
+    )).rejects.toThrow("pinned App ID and slug");
   });
 
-  it("blocks merge when the default branch advances after verification", async () => {
+  it("blocks merge when the default branch head advances after verification", async () => {
     const verifier = await verifierModule();
     const baseSha = "a".repeat(40);
     const headSha = "b".repeat(40);
-    const expectedMergeBase = "c".repeat(40);
+    const policy = verifierPolicy();
+    const binding = pullBinding(baseSha, headSha);
+    const calls: string[] = [];
     const github = {
       request: async (_method: string, apiPath: string) => {
-        if (apiPath.endsWith("/protection")) {
-          return { required_status_checks: { strict: true } };
+        calls.push(apiPath);
+        if (apiPath.includes("/check-runs")) {
+          return {
+            total_count: 2,
+            check_runs: [
+              {
+                name: "verify",
+                head_sha: headSha,
+                status: "completed",
+                conclusion: "success",
+                app: { id: 15368 },
+              },
+              {
+                name: "one-cli/independent-verifier",
+                head_sha: headSha,
+                status: "completed",
+                conclusion: "success",
+                app: { id: 15368 },
+              },
+            ],
+          };
+        }
+        if (apiPath.endsWith("/reviews?per_page=100")) {
+          return [
+            {
+              state: "APPROVED",
+              commit_id: headSha,
+              body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
+              user: { login: "github-actions[bot]", type: "Bot" },
+            },
+          ];
+        }
+        if (apiPath.includes("/compare/")) {
+          return { merge_base_commit: { sha: baseSha } };
+        }
+        if (apiPath === "/repos/beforeload/one-cli") {
+          return { full_name: "beforeload/one-cli", default_branch: "main" };
         }
         if (apiPath.includes("/pulls/7")) {
           return {
             state: "open",
             draft: false,
+            mergeable: true,
             base: {
               ref: "main",
               sha: baseSha,
@@ -114,28 +185,76 @@ describe("independent verifier trusted workflow", () => {
             head: { sha: headSha },
           };
         }
-        if (apiPath.includes("/compare/")) {
-          return { merge_base_commit: { sha: expectedMergeBase } };
-        }
         if (apiPath.endsWith("/branches/main")) {
-          return { commit: { sha: "d".repeat(40) } };
+          return { name: "main", commit: { sha: "d".repeat(40) } };
         }
         throw new Error(`Unexpected API path: ${apiPath}`);
       },
     };
     await expect(verifier.assertMergePreconditions(
       github,
-      { repository: { owner: "beforeload", name: "one-cli", defaultBranch: "main" } },
-      {
-        repository: "beforeload/one-cli",
-        baseRepository: "beforeload/one-cli",
-        baseRef: "main",
-        baseSha,
-        headSha,
-        pullNumber: 7,
-      },
-      expectedMergeBase,
+      policy,
+      binding,
     )).rejects.toThrow("Default branch advanced");
+    expect(calls.some((apiPath) => apiPath.endsWith("/protection"))).toBe(false);
+    expect(calls.slice(-3)).toEqual([
+      "/repos/beforeload/one-cli",
+      "/repos/beforeload/one-cli/pulls/7",
+      "/repos/beforeload/one-cli/branches/main",
+    ]);
+  });
+
+  it("blocks merge when repository default_branch changes", async () => {
+    const verifier = await verifierModule();
+    const baseSha = "a".repeat(40);
+    const headSha = "b".repeat(40);
+    const github = {
+      request: async (_method: string, apiPath: string) => {
+        if (apiPath.includes("/check-runs")) {
+          return {
+            total_count: 2,
+            check_runs: [
+              {
+                name: "verify",
+                head_sha: headSha,
+                status: "completed",
+                conclusion: "success",
+                app: { id: 15368 },
+              },
+              {
+                name: "one-cli/independent-verifier",
+                head_sha: headSha,
+                status: "completed",
+                conclusion: "success",
+                app: { id: 15368 },
+              },
+            ],
+          };
+        }
+        if (apiPath.endsWith("/reviews?per_page=100")) {
+          return [
+            {
+              state: "APPROVED",
+              commit_id: headSha,
+              body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
+              user: { login: "github-actions[bot]", type: "Bot" },
+            },
+          ];
+        }
+        if (apiPath.includes("/compare/")) {
+          return { merge_base_commit: { sha: baseSha } };
+        }
+        if (apiPath === "/repos/beforeload/one-cli") {
+          return { full_name: "beforeload/one-cli", default_branch: "develop" };
+        }
+        throw new Error(`Unexpected API path: ${apiPath}`);
+      },
+    };
+    await expect(verifier.assertMergePreconditions(
+      github,
+      verifierPolicy(),
+      pullBinding(baseSha, headSha),
+    )).rejects.toThrow("default branch changed");
   });
 });
 
@@ -153,8 +272,29 @@ async function verifierModule(): Promise<{
     github: { request(method: string, apiPath: string): Promise<unknown> },
     policy: unknown,
     binding: unknown,
-    expectedMergeBase: string,
   ): Promise<void>;
 }> {
   return await import(pathToFileURL(path.join(ROOT, "scripts/independent-verifier.mjs")).href);
+}
+
+function verifierPolicy() {
+  return {
+    repository: { owner: "beforeload", name: "one-cli", defaultBranch: "main" },
+    requiredChecks: [
+      { name: "verify", appId: 15368 },
+      { name: "one-cli/independent-verifier", appId: 15368 },
+    ],
+    reviewIdentity: { actor: "github-actions[bot]" },
+  };
+}
+
+function pullBinding(baseSha: string, headSha: string) {
+  return {
+    repository: "beforeload/one-cli",
+    baseRepository: "beforeload/one-cli",
+    baseRef: "main",
+    baseSha,
+    headSha,
+    pullNumber: 7,
+  };
 }

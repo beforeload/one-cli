@@ -15,7 +15,6 @@ const required = [
   "harness/tsconfig.json",
   "harness/launchd/com.beforeload.one-cli-harness.plist",
   "harness/src/github.ts",
-  "harness/src/github-app.ts",
   "harness/src/governance.ts",
   "harness/src/executable.ts",
   "harness/src/host.ts",
@@ -134,12 +133,6 @@ const harnessIndex = read("harness/src/index.ts");
 for (const command of ["doctor", "verifier-status", "seed", "run", "status", "install", "uninstall"]) {
   if (!harnessIndex.includes(`"${command}"`)) failures.push(`harness CLI lacks ${command}`);
 }
-if (
-  /loadGitHubAppCredentials|GitHubAppTokenProvider|GitHubAppVerifier|ONE_CLI_GITHUB_APP_PRIVATE_KEY/u
-    .test(harnessIndex)
-) {
-  failures.push("local harness composes verifier credentials or authority");
-}
 if (!harnessIndex.includes('options.command === "run" && options.dryRun')) {
   failures.push("run --dry-run is not intercepted before mutable runtime setup");
 }
@@ -156,25 +149,29 @@ for (const expected of [
 
 const policy = YAML.parse(read("harness/verifier-policy.yml"));
 if (
-  policy?.schema !== "one-cli.independent-verifier/v3" ||
+  policy?.schema !== "one-cli.independent-verifier/v4" ||
   policy?.repository?.owner !== "beforeload" ||
   policy?.repository?.name !== "one-cli" ||
   policy?.repository?.defaultBranch !== "main" ||
   policy?.workflow?.event !== "pull_request_target" ||
   !/^[0-9a-f]{40}$/u.test(policy?.workflow?.blobSha ?? "") ||
-  policy?.workflow?.policyVersion !== "one-cli.independent-verifier/v3" ||
+  policy?.workflow?.policyVersion !== "one-cli.independent-verifier/v4" ||
   policy?.emittedCheck?.name !== "one-cli/independent-verifier" ||
-  policy?.requiredChecks?.length !== 1 ||
+  policy?.emittedCheck?.appId !== 15368 ||
+  policy?.requiredChecks?.length !== 2 ||
   policy.requiredChecks[0]?.name !== "verify" ||
   policy.requiredChecks[0]?.appId !== 15368 ||
+  policy.requiredChecks[1]?.name !== "one-cli/independent-verifier" ||
+  policy.requiredChecks[1]?.appId !== 15368 ||
   policy?.semanticReview?.quorum !== 2 ||
   policy?.semanticReview?.profiles?.length !== 2
 ) {
   failures.push("trusted verifier policy identity, binding, or quorum is invalid");
 }
 if (
-  policy?.reviewIdentity?.actor !== `${policy?.reviewIdentity?.appSlug}[bot]` ||
-  policy?.reviewIdentity?.appIdEnvironment !== "ONE_CLI_VERIFIER_APP_ID"
+  policy?.reviewIdentity?.actor !== "github-actions[bot]" ||
+  policy?.reviewIdentity?.appSlug !== "github-actions" ||
+  policy?.reviewIdentity?.appId !== 15368
 ) {
   failures.push("verifier review actor and App ID are not pinned");
 }
@@ -198,20 +195,25 @@ for (const expected of [
   "path: untrusted",
   "fetch-depth: 0",
   "persist-credentials: false",
-  "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
-  "ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v3",
-  "permission-checks: write",
-  "permission-contents: read",
-  "permission-pull-requests: write",
+  "ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4",
+  "name: one-cli/independent-verifier",
+  "models: read",
+  "GITHUB_TOKEN: ${{ github.token }}",
+  "needs: verifier",
+  "if: needs.verifier.result == 'success'",
   'node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"',
-  "--apply",
+  "--verify",
+  "--merge",
   "one-cli/independent-verifier",
 ]) {
   if (!workflow.includes(expected)) failures.push(`independent verifier workflow lacks ${expected}`);
 }
 const untrustedCheckout = workflow.indexOf("Check out untrusted pull data");
 const verifierExecution = workflow.indexOf("Verify exact pull and publish App evidence");
-if (untrustedCheckout < 0 || verifierExecution < untrustedCheckout) {
+if (
+  untrustedCheckout < 0 ||
+  workflow.indexOf("Verify exact pull and submit bound review") < untrustedCheckout
+) {
   failures.push("untrusted pull checkout is not isolated before trusted verifier execution");
 }
 if (/\b(?:run|working-directory):\s*(?:untrusted|\$\{\{[^}]*head)/u.test(workflow)) {
@@ -227,20 +229,24 @@ for (const expected of [
   "required.appId",
   "submitBoundReview",
   "commit_id: binding.headSha",
+  "assertBoundApproval",
   "mergeExactHead",
   "sha: binding.headSha",
   "assertInstallationIdentity",
-  "permissions must be exactly checks:write",
   "assertMergePreconditions",
   "Default branch advanced after verification",
+  "repository.default_branch",
+  "submitFinalReview",
   "requireTwoProfileVetoQuorum",
-  "if (!options.apply)",
+  "if (!options.verify)",
 ]) {
   if (!verifierScript.includes(expected)) failures.push(`trusted verifier script lacks ${expected}`);
 }
+if (/branches\/[^/]+\/protection|\/rulesets/u.test(verifierScript)) {
+  failures.push("trusted workflow token must not call branch-protection or ruleset APIs");
+}
 const verifierRuntimeSources = [
   harnessIndex,
-  read("harness/src/github-app.ts"),
   read("harness/src/governance.ts"),
   read("harness/src/verifier.ts"),
   read("scripts/independent-verifier.mjs"),
@@ -253,12 +259,8 @@ if (
 ) {
   failures.push("runtime verifier code can mutate or requests branch protection authority");
 }
-if (
-  /createPrivateKey|privateKeyPath|createGitHubAppJwt|installations\/[^/]+\/access_tokens/u.test(
-    read("harness/src/github-app.ts"),
-  )
-) {
-  failures.push("local harness still loads or mints verifier App credentials");
+if (/create-github-app-token|ONE_CLI_VERIFIER_APP_PRIVATE_KEY|secrets\./u.test(workflow)) {
+  failures.push("independent verifier workflow references a custom App or repository secret");
 }
 
 const governance = read(".github/workflows/governance.yml");
@@ -297,9 +299,12 @@ const readme = read("harness/README.md");
 for (const expected of [
   "`pull_request_target`",
   "`one-cli/independent-verifier`",
-  "any additional",
-  "two independent",
+  "Two independent",
+  "`github-actions[bot]`",
+  "App ID `15368`",
   "default branch",
+  "can_approve_pull_request_reviews=true",
+  "require_last_push_approval",
 ]) {
   if (!readme.includes(expected)) failures.push(`harness verifier documentation lacks ${expected}`);
 }

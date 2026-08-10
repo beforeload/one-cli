@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { GhClient } from "./github.js";
 import type { HostIssue } from "./github.js";
-import { partitionLocalEnvironment } from "./github-app.js";
 import {
   GhGovernanceReadinessPort,
   type GovernanceReadiness,
@@ -72,23 +71,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const hostEnv = loadHostEnvironment(paths.envFile);
     const environment = safeEnvironment(paths.oneCliHome, hostEnv);
     const repository = loadRepository(options.workspace);
-    const partition = partitionLocalEnvironment(environment);
     const runner = new SpawnProcessRunner(Object.values(hostEnv));
     const verifierPolicy = loadVerifierPolicy(defaultVerifierPolicy());
     const verifier = inspectTrustedVerifier(
       options.workspace,
       verifierPolicy,
-      partition.rejectedVerifierSecrets,
     );
     const ghExecutable = resolveGhExecutable(
-      partition.worker,
+      environment,
       options.command === "doctor" ||
         options.command === "install" ||
         options.command === "verifier-status" ||
         (options.command === "run" && options.dryRun),
     );
     const workerEnvironment: Record<string, string> = {
-      ...partition.worker,
+      ...environment,
       ONE_CLI_GH_EXECUTABLE: ghExecutable,
     };
     const governance = new GhGovernanceReadinessPort({
@@ -97,9 +94,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       environment: workerEnvironment,
       repository,
       policy: verifierPolicy,
-      ...(partition.verifierAppId === undefined
-        ? {}
-        : { verifierAppId: partition.verifierAppId }),
     });
     if (options.command === "verifier-status") {
       const readiness = await governance.inspect();
@@ -277,7 +271,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
                 Promise.resolve(inspectTrustedVerifier(
                   options.workspace,
                   verifierPolicy,
-                  partition.rejectedVerifierSecrets,
                 )),
               ]);
               const checks = [
@@ -304,7 +297,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
                 const readiness = inspectTrustedVerifier(
                   options.workspace,
                   verifierPolicy,
-                  partition.rejectedVerifierSecrets,
                 );
                 return {
                   action: "verifier-status",

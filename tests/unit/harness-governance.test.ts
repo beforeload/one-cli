@@ -77,6 +77,29 @@ describe("live governance readiness gate", () => {
     }
   });
 
+  it("blocks product execution when Actions cannot approve pull requests", async () => {
+    const result = await port(readyProtection(), false).inspect();
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "actions-can-approve-pull-request-reviews",
+      ok: false,
+      detail: "Repository Actions workflows cannot approve pull request reviews",
+    });
+  });
+
+  it("blocks product execution without last-push approval protection", async () => {
+    const protection = readyProtection();
+    const reviews = protection.required_pull_request_reviews as Record<string, unknown>;
+    reviews.require_last_push_approval = false;
+    const result = await port(protection).inspect();
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "last-push-approval",
+      ok: false,
+      detail: "Last-push approval is not required",
+    });
+  });
+
   it("reports every invariant instead of collapsing readiness into one healthy flag", async () => {
     const result = await port(oldProtection()).inspect();
     expect(result.ready).toBe(false);
@@ -85,6 +108,7 @@ describe("live governance readiness gate", () => {
       "workflow-path",
       "workflow-blob",
       "workflow-policy-version",
+      "actions-can-approve-pull-request-reviews",
       "protection-strict",
       "protection-enforce-admins",
       "protection-force-pushes-disabled",
@@ -94,12 +118,16 @@ describe("live governance readiness gate", () => {
       "required-checks-exact",
       "stale-review-dismissal",
       "required-approvals",
+      "last-push-approval",
       "runtime-no-protection-write",
     ]));
   });
 });
 
-function port(protection: Record<string, unknown>): GhGovernanceReadinessPort {
+function port(
+  protection: Record<string, unknown>,
+  canApprovePullRequestReviews = true,
+): GhGovernanceReadinessPort {
   const responses: Record<string, unknown> = {
     "repos/beforeload/one-cli": { default_branch: "main" },
     "repos/beforeload/one-cli/actions/workflows/independent-verifier.yml": {
@@ -112,6 +140,10 @@ function port(protection: Record<string, unknown>): GhGovernanceReadinessPort {
       sha: POLICY.workflow.blobSha,
       encoding: "base64",
       content: Buffer.from(WORKFLOW).toString("base64"),
+    },
+    "repos/beforeload/one-cli/actions/permissions/workflow": {
+      default_workflow_permissions: "read",
+      can_approve_pull_request_reviews: canApprovePullRequestReviews,
     },
     "repos/beforeload/one-cli/branches/main/protection": protection,
     installation: {
@@ -141,7 +173,6 @@ function port(protection: Record<string, unknown>): GhGovernanceReadinessPort {
       defaultBranch: "main",
     },
     policy: POLICY,
-    verifierAppId: "4242",
   });
 }
 
@@ -151,7 +182,7 @@ function readyProtection(): Record<string, unknown> {
       strict: true,
       checks: [
         { context: "verify", app_id: 15368 },
-        { context: "one-cli/independent-verifier", app_id: 4242 },
+        { context: "one-cli/independent-verifier", app_id: 15368 },
       ],
     },
     enforce_admins: { enabled: true },
