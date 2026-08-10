@@ -30,6 +30,7 @@ import {
   ProviderIssueNormalizer,
 } from "./maintenance.js";
 import { AutonomyOrchestrator } from "./orchestrator.js";
+import type { ExpectedRoadmapBinding } from "./roadmap-enforcement.js";
 import {
   SpawnProcessRunner,
   assertProcessSucceeded,
@@ -92,11 +93,15 @@ interface CliOptions {
   evidence?: string;
   action?: string;
   attemptId?: string;
+  executionScope: "normal" | "roadmap-only";
+  expectedRoadmapIssue?: number;
+  expectedRoadmapMarker?: string;
   positionals: string[];
 }
 
 async function runCommand(command: string, argv: readonly string[]): Promise<number> {
   const options = parseOptions(argv);
+  assertRoadmapCliBinding(command, options);
   if (command === "doctor") return await doctor(options);
   const config = loadAutonomyConfig(options.workspace, {
     ...(options.mode === undefined ? {} : { mode: options.mode }),
@@ -119,9 +124,12 @@ async function runCommand(command: string, argv: readonly string[]): Promise<num
         return 0;
       case "status":
         output(options, {
+          schema: "autonomy.one-cli/status-v1",
+          executionScope: options.executionScope,
           mode: config.mode,
           monitoring: monitoringSnapshot(config, store),
           activeAttempt: store.getActiveAttempt() ?? null,
+          action: latestAutonomyAction(store),
           issues: store.listIssues(config.repoKey),
           attempts: store.listAttempts(),
         });
@@ -321,7 +329,12 @@ async function retry(
   const attempt = selectedAttempt(options, store);
   const evidence =
     options.evidence === undefined ? "" : readEvidence(config.repoRoot, options.evidence);
-  const result = await orchestratorRuntime(config, store).retryAttempt(
+  const result = await orchestratorRuntime(
+    config,
+    store,
+    options.executionScope,
+    roadmapBinding(options),
+  ).retryAttempt(
     attempt.id,
     evidence,
     new AbortController().signal,
@@ -336,7 +349,12 @@ async function cancel(
   store: AutonomyStore,
 ): Promise<number> {
   const attempt = selectedAttempt(options, store);
-  const result = await orchestratorRuntime(config, store).cancelAttempt(
+  const result = await orchestratorRuntime(
+    config,
+    store,
+    options.executionScope,
+    roadmapBinding(options),
+  ).cancelAttempt(
     attempt.id,
     "operator cancellation",
     new AbortController().signal,
@@ -358,7 +376,12 @@ async function resolveInDoubt(
       "resolve-in-doubt only permits failed|cancelled; use reconcile to prove external success",
     );
   }
-  const result = await orchestratorRuntime(config, store).resolveAttemptInDoubt(
+  const result = await orchestratorRuntime(
+    config,
+    store,
+    options.executionScope,
+    roadmapBinding(options),
+  ).resolveAttemptInDoubt(
     attempt.id,
     target as "failed" | "cancelled",
     new AbortController().signal,
@@ -373,7 +396,7 @@ async function once(
   store: AutonomyStore,
   signal = new AbortController().signal,
 ): Promise<number> {
-  const coordinator = runtime(config, store);
+  const coordinator = runtime(config, store, options.executionScope, roadmapBinding(options));
   const result = await coordinator.tick(signal);
   output(options, result);
   return ["blocked", "failed", "in_doubt"].includes(result.state) ? 1 : 0;
@@ -389,7 +412,7 @@ async function daemon(
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   const interval = options.intervalMs ?? config.product.limits.loopMinutes * 60_000;
-  const coordinator = runtime(config, store);
+  const coordinator = runtime(config, store, options.executionScope, roadmapBinding(options));
   try {
     while (!controller.signal.aborted) {
       try {
@@ -431,7 +454,12 @@ async function reconcile(
     });
     return 0;
   }
-  const result = await orchestratorRuntime(config, store).reconcile(new AbortController().signal);
+  const result = await orchestratorRuntime(
+    config,
+    store,
+    options.executionScope,
+    roadmapBinding(options),
+  ).reconcile(new AbortController().signal);
   output(options, result ?? { action: "reconcile", state: "unchanged" });
   return result?.state === "in_doubt" ? 1 : 0;
 }
@@ -551,6 +579,13 @@ async function supervise(options: CliOptions, config: AutonomyConfig): Promise<n
     config.mode,
     "--output",
     options.output,
+    ...(options.executionScope === "roadmap-only" ? ["--roadmap-only"] : []),
+    ...(options.expectedRoadmapIssue === undefined
+      ? []
+      : ["--expected-roadmap-issue", String(options.expectedRoadmapIssue)]),
+    ...(options.expectedRoadmapMarker === undefined
+      ? []
+      : ["--expected-roadmap-marker", options.expectedRoadmapMarker]),
     ...(options.intervalMs === undefined
       ? []
       : ["--interval-ms", String(options.intervalMs)]),
@@ -769,8 +804,13 @@ function assertWithin(root: string, candidate: string, label: string): void {
   }
 }
 
-function runtime(config: AutonomyConfig, store: AutonomyStore): MaintenanceCoordinator {
-  const parts = runtimeParts(config, store);
+function runtime(
+  config: AutonomyConfig,
+  store: AutonomyStore,
+  executionScope: CliOptions["executionScope"] = "normal",
+  expectedRoadmapBinding?: ExpectedRoadmapBinding,
+): MaintenanceCoordinator {
+  const parts = runtimeParts(config, store, executionScope, expectedRoadmapBinding);
   return new MaintenanceCoordinator({
     config,
     store,
@@ -780,6 +820,8 @@ function runtime(config: AutonomyConfig, store: AutonomyStore): MaintenanceCoord
     sandboxFactory: (worktreePath) => sandboxFor(config, worktreePath),
     orchestrator: parts.orchestrator,
     intake: parts.intake,
+    executionScope,
+    ...(expectedRoadmapBinding ? { expectedRoadmapBinding } : {}),
     ...(config.mode === "observe"
       ? {}
       : {
@@ -793,11 +835,18 @@ function runtime(config: AutonomyConfig, store: AutonomyStore): MaintenanceCoord
 function orchestratorRuntime(
   config: AutonomyConfig,
   store: AutonomyStore,
+  executionScope: CliOptions["executionScope"] = "normal",
+  expectedRoadmapBinding?: ExpectedRoadmapBinding,
 ): AutonomyOrchestrator {
-  return runtimeParts(config, store).orchestrator;
+  return runtimeParts(config, store, executionScope, expectedRoadmapBinding).orchestrator;
 }
 
-function runtimeParts(config: AutonomyConfig, store: AutonomyStore): {
+function runtimeParts(
+  config: AutonomyConfig,
+  store: AutonomyStore,
+  executionScope: CliOptions["executionScope"] = "normal",
+  expectedRoadmapBinding?: ExpectedRoadmapBinding,
+): {
   runConfig: ReturnType<typeof resolveRunConfig>;
   provider: ChatProvider;
   github: GitHubClient;
@@ -848,6 +897,8 @@ function runtimeParts(config: AutonomyConfig, store: AutonomyStore): {
     runConfig,
     intake,
     release: releaseManager(config),
+    executionScope,
+    ...(expectedRoadmapBinding ? { expectedRoadmapBinding } : {}),
   });
   return {
     runConfig,
@@ -914,6 +965,9 @@ function parseOptions(argv: readonly string[]): CliOptions {
   let evidence: string | undefined;
   let action: string | undefined;
   let attemptId: string | undefined;
+  let executionScope: CliOptions["executionScope"] = "normal";
+  let expectedRoadmapIssue: number | undefined;
+  let expectedRoadmapMarker: string | undefined;
   const positionals: string[] = [];
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
@@ -941,6 +995,15 @@ function parseOptions(argv: readonly string[]): CliOptions {
       if (action !== "promote-release") throw new Error("Unsupported --action");
     } else if (value === "--attempt") {
       attemptId = requiredValue(argv, ++index, value);
+    } else if (value === "--roadmap-only") {
+      executionScope = "roadmap-only";
+    } else if (value === "--expected-roadmap-issue") {
+      expectedRoadmapIssue = Number(requiredValue(argv, ++index, value));
+      if (!Number.isSafeInteger(expectedRoadmapIssue) || expectedRoadmapIssue <= 0) {
+        throw new Error("--expected-roadmap-issue must be a positive integer");
+      }
+    } else if (value === "--expected-roadmap-marker") {
+      expectedRoadmapMarker = requiredValue(argv, ++index, value);
     } else if (value.startsWith("-")) throw new Error(`Unknown autonomy option: ${value}`);
     else positionals.push(value);
   }
@@ -948,13 +1011,43 @@ function parseOptions(argv: readonly string[]): CliOptions {
     workspace,
     output: outputFormat,
     apply,
+    executionScope,
     positionals,
     ...(mode === undefined ? {} : { mode }),
     ...(intervalMs === undefined ? {} : { intervalMs }),
     ...(evidence === undefined ? {} : { evidence }),
     ...(action === undefined ? {} : { action }),
     ...(attemptId === undefined ? {} : { attemptId }),
+    ...(expectedRoadmapIssue === undefined ? {} : { expectedRoadmapIssue }),
+    ...(expectedRoadmapMarker === undefined ? {} : { expectedRoadmapMarker }),
   };
+}
+
+function roadmapBinding(options: CliOptions): ExpectedRoadmapBinding | undefined {
+  return options.expectedRoadmapIssue === undefined || options.expectedRoadmapMarker === undefined
+    ? undefined
+    : {
+        issueNumber: options.expectedRoadmapIssue,
+        seedMarker: options.expectedRoadmapMarker,
+      };
+}
+
+function assertRoadmapCliBinding(command: string, options: CliOptions): void {
+  const hasIssue = options.expectedRoadmapIssue !== undefined;
+  const hasMarker = options.expectedRoadmapMarker !== undefined;
+  if (hasIssue !== hasMarker) {
+    throw new Error("Expected roadmap issue and marker must be supplied together");
+  }
+  if ((hasIssue || hasMarker) && options.executionScope !== "roadmap-only") {
+    throw new Error("Expected roadmap binding is valid only with --roadmap-only");
+  }
+  if (
+    options.executionScope === "roadmap-only" &&
+    command !== "status" &&
+    (!hasIssue || !hasMarker)
+  ) {
+    throw new Error("Roadmap-only execution requires exact expected issue and marker arguments");
+  }
 }
 
 function output(options: CliOptions, value: unknown, forceLine = false): void {
@@ -1052,7 +1145,21 @@ Options:
   --evidence <text|file>  New bounded diagnosis evidence for retry
   --attempt <id>     Attempt binding for release stage
   --action promote-release  Record a release-promotion approval
+  --roadmap-only      Execute only agent-ready cold-start roadmap issues
+  --expected-roadmap-issue <n>  Host-bound next roadmap issue
+  --expected-roadmap-marker <marker>  Host-bound exact manifest marker
   --apply            Apply reconcile or garbage collection`;
+}
+
+function latestAutonomyAction(store: AutonomyStore): {
+  type: string;
+  aggregateId: string;
+  createdAt: number;
+} | null {
+  const event = store.listEvents({ limit: 1_000 }).at(-1);
+  return event
+    ? { type: event.type, aggregateId: event.aggregateId, createdAt: event.createdAt }
+    : null;
 }
 
 function readEvidence(workspace: string, value: string): string {

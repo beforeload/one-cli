@@ -95,6 +95,7 @@ for (const [file, values] of Object.entries({
     "    - .autonomy/**",
     "    - .github/workflows/**",
     "    - .github/CODEOWNERS",
+    "    - harness/**",
     "exceptionMode: fail-closed",
     "strategy: merge",
     "detachedExactMergeWorktree: true",
@@ -241,6 +242,7 @@ for (const protectedPath of [
   ".autonomy/*",
   ".github/workflows/*",
   ".github/CODEOWNERS",
+  "harness/*",
 ]) {
   requireText(".github/workflows/governance.yml", protectedPath);
 }
@@ -257,6 +259,7 @@ for (const codeownerPath of [
   "/.autonomy/** @beforeload",
   "/.github/workflows/** @beforeload",
   "/.github/CODEOWNERS @beforeload",
+  "/harness/** @beforeload",
 ]) {
   requireText(".github/CODEOWNERS", codeownerPath);
 }

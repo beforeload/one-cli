@@ -24,7 +24,9 @@ import {
   normalizedIssueFields,
 } from "./github.js";
 import {
+  COLD_START_ROADMAP_LABEL,
   COMMUNITY_SOURCE_LABEL,
+  hasApprovedPathBindingMarker,
   isTrustedExecutionIssue,
   parseApprovedPathBinding,
   type TrustedIntake,
@@ -41,6 +43,11 @@ import { deterministicReview, independentReview, type ReviewerPort } from "./rev
 import type { SandboxAvailability, SandboxPort } from "./sandbox.js";
 import type { AutonomyStore } from "./store.js";
 import { runAutonomyWorker, type WorkerResult } from "./worker.js";
+import {
+  createRoadmapScopeBinding,
+  requireRoadmapScopeBinding,
+  type ExpectedRoadmapBinding,
+} from "./roadmap-enforcement.js";
 
 const COORDINATOR_TTL_MS = 5 * 60_000;
 const ISSUE_TTL_MS = 24 * 60 * 60_000;
@@ -115,6 +122,8 @@ export interface OrchestratorDependencies {
   id?: () => string;
   coordinatorTtlMs?: number;
   issueTtlMs?: number;
+  executionScope?: "normal" | "roadmap-only";
+  expectedRoadmapBinding?: ExpectedRoadmapBinding;
 }
 
 export interface TickResult {
@@ -219,6 +228,7 @@ export class AutonomyOrchestrator {
   async reconcile(signal: AbortSignal): Promise<TickResult | undefined> {
     const attempt = this.dependencies.store.getActiveAttempt();
     if (!attempt) return undefined;
+    this.assertExecutionScope(attempt);
     let current = attempt;
     if (current.state === "pending") {
       return await this.acquireRemoteClaim(current, signal, true);
@@ -367,6 +377,7 @@ export class AutonomyOrchestrator {
   async advanceActiveIssue(signal: AbortSignal): Promise<TickResult | undefined> {
     const attempt = this.dependencies.store.getActiveAttempt();
     if (!attempt) return undefined;
+    this.assertExecutionScope(attempt);
     this.refreshIssueLease(attempt);
     try {
       return await this.advance(
@@ -635,7 +646,7 @@ export class AutonomyOrchestrator {
   async observe(signal: AbortSignal): Promise<TickResult> {
     const candidates = await this.dependencies.github.listCandidateIssues(
       this.repositoryRef,
-      ["agent-ready"],
+      this.candidateLabels(),
       signal,
     );
     return {
@@ -658,17 +669,26 @@ export class AutonomyOrchestrator {
     );
     const candidates = await this.dependencies.github.listCandidateIssues(
       this.repositoryRef,
-      ["agent-ready"],
+      this.candidateLabels(),
       signal,
     );
     for (const issue of [...candidates].sort((a, b) => a.number - b.number)) {
+      if (
+        issue.labels.includes("parent") ||
+        (this.dependencies.executionScope === "roadmap-only" &&
+          !issue.labels.includes(COLD_START_ROADMAP_LABEL))
+      ) {
+        continue;
+      }
       const branch = issueBranch(issue);
       const issueFields = normalizedIssueFields(
         issue,
         this.dependencies.config.issuePolicy.normalization.requiredFields,
       );
       const communityBound = issue.labels.includes(COMMUNITY_SOURCE_LABEL);
-      const approvedPaths = communityBound && issueFields
+      const coldStartBound = issue.labels.includes(COLD_START_ROADMAP_LABEL);
+      const hasPathMarker = issueFields ? hasApprovedPathBindingMarker(issueFields) : false;
+      const approvedPaths = issueFields && hasPathMarker
         ? parseApprovedPathBinding(issueFields)
         : undefined;
       const [branchExists, pull] = await Promise.all([
@@ -681,7 +701,7 @@ export class AutonomyOrchestrator {
           this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
         ) ||
         issueFields === undefined ||
-        (communityBound && approvedPaths === undefined) ||
+        ((communityBound || coldStartBound || hasPathMarker) && approvedPaths === undefined) ||
         !isExecutionEligible({
           issue,
           exactAuthor: this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
@@ -693,6 +713,15 @@ export class AutonomyOrchestrator {
         continue;
       }
       const digest = issueDigest(issue);
+      const roadmapScopeBinding = coldStartBound
+        ? createRoadmapScopeBinding({
+            issue,
+            issueDigest: digest,
+            fields: issueFields,
+            approvedPaths: approvedPaths ?? [],
+            expected: this.expectedRoadmapBinding(),
+          })
+        : undefined;
       const issueId = `github-${issue.number}`;
       const claimRef = issueClaimRef(issue.number, digest);
       this.dependencies.store.putRepo({
@@ -753,6 +782,9 @@ export class AutonomyOrchestrator {
           },
           issueFields,
           ...(approvedPaths === undefined ? {} : { approvedPaths: [...approvedPaths] }),
+          ...(roadmapScopeBinding === undefined
+            ? {}
+            : { roadmapScopeBinding: jsonValue(roadmapScopeBinding) }),
         },
       });
       return await this.acquireRemoteClaim(pending, signal, false);
@@ -2489,6 +2521,7 @@ export class AutonomyOrchestrator {
       this.dependencies.config.issuePolicy.normalization.requiredFields,
     );
     const approvedPaths = fields ? parseApprovedPathBinding(fields) : undefined;
+    const hasPathMarker = fields ? hasApprovedPathBindingMarker(fields) : false;
     const storedApprovedPaths = optionalStringArray(detailObject(attempt).approvedPaths);
     const quarantine = new Set([
       "agent-failed",
@@ -2501,7 +2534,9 @@ export class AutonomyOrchestrator {
       !issue.labels.includes("agent-ready") ||
       issue.labels.some((label) => quarantine.has(label)) ||
       fields === undefined ||
-      (issue.labels.includes(COMMUNITY_SOURCE_LABEL) &&
+      ((issue.labels.includes(COMMUNITY_SOURCE_LABEL) ||
+        issue.labels.includes(COLD_START_ROADMAP_LABEL) ||
+        hasPathMarker) &&
         (approvedPaths === undefined ||
           storedApprovedPaths === undefined ||
           !sameStrings(approvedPaths, storedApprovedPaths))) ||
@@ -2575,6 +2610,26 @@ export class AutonomyOrchestrator {
 
   private maxChangedBytes(): number {
     return this.dependencies.config.product.limits.maxChangedBytes ?? 2 * 1024 * 1024;
+  }
+
+  private candidateLabels(): readonly string[] {
+    return this.dependencies.executionScope === "roadmap-only"
+      ? ["agent-ready", COLD_START_ROADMAP_LABEL]
+      : ["agent-ready"];
+  }
+
+  private assertExecutionScope(attempt: Attempt): void {
+    if (this.dependencies.executionScope === "roadmap-only") {
+      requireRoadmapScopeBinding(attempt, this.expectedRoadmapBinding());
+    }
+  }
+
+  private expectedRoadmapBinding(): ExpectedRoadmapBinding {
+    const binding = this.dependencies.expectedRoadmapBinding;
+    if (!binding) {
+      throw new Error("Roadmap-only execution requires an exact host issue and marker binding");
+    }
+    return binding;
   }
 }
 

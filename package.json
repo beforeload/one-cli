@@ -25,13 +25,14 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json && tsc -p harness/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p harness/tsconfig.json --noEmit",
     "autonomy:validate": "node scripts/validate-autonomy.mjs",
+    "harness:validate": "node scripts/validate-harness.mjs",
     "test": "vitest run tests/unit",
     "test:integration": "npm run build && vitest run tests/integration --no-file-parallelism",
     "smoke": "vitest run tests/smoke --no-file-parallelism",
-    "check": "npm run autonomy:validate && npm run typecheck && npm test && npm run test:integration && npm run smoke && npm run build",
+    "check": "npm run autonomy:validate && npm run harness:validate && npm run typecheck && npm test && npm run test:integration && npm run smoke && npm run build",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run check && npm run build"
   },

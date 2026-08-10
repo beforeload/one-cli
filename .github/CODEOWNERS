@@ -2,3 +2,5 @@
 /.autonomy/** @beforeload
 /.github/workflows/** @beforeload
 /.github/CODEOWNERS @beforeload
+/harness/** @beforeload
+/src/autonomy/roadmap-enforcement.ts @beforeload

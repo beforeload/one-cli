@@ -20,6 +20,29 @@ node dist/index.js run -p "阅读 README，告诉我项目如何工作"
 
 `npm run check` 依次验证 autonomy contract、typecheck、unit、integration、smoke 和 build。`prepublishOnly` 仍执行完整 check 后再次 build。
 
+## Cold-start Harness
+
+仓库内的 [`harness/`](harness/) 是独立 Node/TypeScript 主机进程：它在 Cursor
+之外运行，只以无 shell、受限输出和超时的 subprocess 调用已构建
+`dist/index.js` 与 `gh`，不使用 Cursor SDK。Roadmap seed、launchd install 和
+uninstall 默认 dry-run；运行状态、append-only journal、lock 与 secrets 全部留在
+`ONE_CLI_HOME`，不会进入仓库或 npm package。
+
+```bash
+npm run build
+node harness/dist/index.js doctor --workspace "$PWD"
+node harness/dist/index.js seed --workspace "$PWD"
+node harness/dist/index.js run --once --workspace "$PWD"
+```
+
+冷启动期间 Harness 使用 `autonomy once --roadmap-only`，只激活一个
+`cold-start-roadmap` child；完成八个 child 的 merge、post-merge dogfood 与 release
+证据后关闭非执行 parent，并自动切回 normal autonomy scope。部署与恢复细节见
+[`harness/README.md`](harness/README.md)。
+launchd 运行必须配置 canonical absolute `ONE_CLI_GH_EXECUTABLE`，active release
+只从 `ONE_CLI_HOME/autonomy/<repo-key>/releases` 解析。Governance bootstrap 合并后，
+applied seed 还必须用 `--bootstrap-merge-sha` 证明 default branch 已包含该 merge。
+
 ## 架构
 
 普通 agent 路径是 `CLI → runAgent → provider/tools/approval → append-only SessionJournal → text/JSONL reporter`。Autonomy 路径是独立的运维层：

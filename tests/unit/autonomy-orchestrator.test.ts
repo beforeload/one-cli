@@ -1,5 +1,5 @@
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatProvider } from "../../src/domain.js";
 import { loadAutonomyConfig, type AutonomyMode } from "../../src/autonomy/config.js";
 import type {
@@ -26,6 +26,7 @@ describe("AutonomyOrchestrator", () => {
   const roots: string[] = [];
 
   afterEach(() => {
+    vi.useRealTimers();
     for (const root of roots.splice(0)) removeTempDir(root);
   });
 
@@ -198,6 +199,60 @@ describe("AutonomyOrchestrator", () => {
       expect(harness.sandboxRuns).toHaveLength(0);
       expect(harness.git.commitCount).toBe(0);
       expect(harness.git.pushCount).toBe(0);
+    } finally {
+      harness.store.close();
+    }
+  });
+
+  it("enforces approved paths for a no-source cold-start roadmap issue", async () => {
+    const approvedPaths = ["src/feature.ts", "tests/feature.test.ts"];
+    const harness = createHarness("auto-pr", roots, {
+      changedPath: "src/unrelated.ts",
+      approvedPaths,
+      issueLabels: ["agent-ready", "cold-start-roadmap"],
+      executionScope: "roadmap-only",
+    });
+    try {
+      await harness.tick();
+      await harness.tick();
+      await expect(harness.tick()).resolves.toMatchObject({
+        action: "review",
+        state: "blocked",
+      });
+      expect(harness.workerCalls[0]).toMatchObject({ approvedPaths });
+      expect(harness.git.commitCount).toBe(0);
+      expect(harness.git.pushCount).toBe(0);
+    } finally {
+      harness.store.close();
+    }
+  });
+
+  it("does not select a cold-start issue without a valid non-empty path binding", async () => {
+    const harness = createHarness("auto-pr", roots, {
+      issueLabels: ["agent-ready", "cold-start-roadmap"],
+      executionScope: "roadmap-only",
+    });
+    try {
+      await expect(harness.tick()).resolves.toMatchObject({
+        action: "select",
+        state: "idle",
+      });
+      expect(harness.workerCalls).toHaveLength(0);
+    } finally {
+      harness.store.close();
+    }
+  });
+
+  it("rejects a roadmap issue that differs from the exact host binding", async () => {
+    const harness = createHarness("auto-pr", roots, {
+      approvedPaths: ["src/index.ts"],
+      issueLabels: ["agent-ready", "cold-start-roadmap"],
+      executionScope: "roadmap-only",
+      expectedRoadmapIssue: 8,
+    });
+    try {
+      await expect(harness.tick()).rejects.toThrow("trusted cold-start source and markers");
+      expect(harness.store.listAttempts()).toHaveLength(0);
     } finally {
       harness.store.close();
     }
@@ -555,19 +610,27 @@ describe("AutonomyOrchestrator", () => {
   });
 
   it("heartbeats coordinator and issue leases throughout a long worker", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
     let finishWorker!: () => void;
+    let workerStarted!: () => void;
     const holdWorker = new Promise<void>((resolve) => {
       finishWorker = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      workerStarted = resolve;
     });
     const harness = createHarness("propose", roots, {
       coordinatorTtlMs: 30,
       issueTtlMs: 30,
       holdWorker,
+      workerStarted,
     });
     try {
       await harness.tick();
       const running = harness.tick();
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await started;
+      await vi.advanceTimersByTimeAsync(80);
       expect(() =>
         harness.store.acquireLease({
           resource: `coordinator:${harness.config.repoKey}`,
@@ -702,6 +765,7 @@ interface HarnessOptions {
   coordinatorTtlMs?: number;
   issueTtlMs?: number;
   holdWorker?: Promise<void>;
+  workerStarted?: () => void;
   omitExecutionMarker?: boolean;
   withRelease?: boolean;
   releaseFailure?: boolean;
@@ -716,6 +780,9 @@ interface HarnessOptions {
   claimPersistenceFailure?: boolean;
   foreignClaimOnRecovery?: boolean;
   githubCheckFailures?: number;
+  issueLabels?: readonly string[];
+  executionScope?: "normal" | "roadmap-only";
+  expectedRoadmapIssue?: number;
 }
 
 function createHarness(
@@ -739,6 +806,8 @@ function createHarness(
     options.approvedPaths === undefined
       ? undefined
       : approvedPathBindingFields(options.approvedPaths);
+  const roadmapIssue = options.issueLabels?.includes("cold-start-roadmap") === true;
+  const roadmapMarker = "<!-- one-cli:cold-start-seed:01-semantic-coherence:v1 -->";
   const body = `${options.omitExecutionMarker ? "" : `${EXECUTION_MARKER}\n`}${config.issuePolicy.normalization.requiredFields
     .map(
       (field) =>
@@ -747,6 +816,10 @@ function createHarness(
             ? pathBinding.scope
             : field === "acceptanceCriteria" && pathBinding
               ? pathBinding.acceptanceCriteria
+              : field === "sourceType" && roadmapIssue
+                ? "cold-start-roadmap"
+                : field === "sourceLinkOrEvidence" && roadmapIssue
+                  ? roadmapMarker
               : "value"
         }`,
     )
@@ -758,10 +831,12 @@ function createHarness(
     state: "open",
     htmlUrl: "https://example.test/issues/7",
     user: { login: "beforeload" },
-    labels: [
-      "agent-ready",
-      options.approvedPaths === undefined ? "source:self-discovery" : "source:community",
-    ],
+    labels: options.issueLabels
+      ? [...options.issueLabels]
+      : [
+          "agent-ready",
+          options.approvedPaths === undefined ? "source:self-discovery" : "source:community",
+        ],
   };
   const shared: {
     localHead: string;
@@ -1047,6 +1122,7 @@ function createHarness(
   const workerCalls: WorkerOptions[] = [];
   const worker = async (input: WorkerOptions) => {
     workerCalls.push(input);
+    options.workerStarted?.();
     if (options.holdWorker) await options.holdWorker;
     if (workerFailures > 0) {
       workerFailures--;
@@ -1113,6 +1189,17 @@ function createHarness(
       ? {}
       : { coordinatorTtlMs: options.coordinatorTtlMs }),
     ...(options.issueTtlMs === undefined ? {} : { issueTtlMs: options.issueTtlMs }),
+    ...(options.executionScope === undefined
+      ? {}
+      : { executionScope: options.executionScope }),
+    ...(options.executionScope === "roadmap-only"
+      ? {
+          expectedRoadmapBinding: {
+            issueNumber: options.expectedRoadmapIssue ?? issue.number,
+            seedMarker: roadmapMarker,
+          },
+        }
+      : {}),
   });
 
   const harness = {
