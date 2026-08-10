@@ -39,6 +39,10 @@ import {
 } from "./schedule.js";
 import type { SandboxPort } from "./sandbox.js";
 import type { AutonomyStore } from "./store.js";
+import {
+  requireRoadmapScopeBinding,
+  type ExpectedRoadmapBinding,
+} from "./roadmap-enforcement.js";
 
 const COORDINATOR_TTL_MS = 5 * 60_000;
 const NORMALIZER_MAX_BYTES = 64 * 1024;
@@ -316,6 +320,8 @@ export interface MaintenanceDependencies {
   now?: () => number;
   id?: () => string;
   coordinatorTtlMs?: number;
+  executionScope?: "normal" | "roadmap-only";
+  expectedRoadmapBinding?: ExpectedRoadmapBinding;
 }
 
 /**
@@ -350,6 +356,27 @@ export class MaintenanceCoordinator {
       return { action: "none", state: "waiting", detail: "Maintenance invocation already in progress" };
     }
     this.running = true;
+    if (this.dependencies.executionScope === "roadmap-only") {
+      const active = this.dependencies.store.getActiveAttempt();
+      if (active) {
+        try {
+          const expected = this.dependencies.expectedRoadmapBinding;
+          if (!expected) {
+            throw new Error(
+              "Roadmap-only execution requires an exact host issue and marker binding",
+            );
+          }
+          requireRoadmapScopeBinding(active, expected);
+        } catch (error) {
+          this.running = false;
+          return {
+            action: "roadmap-scope",
+            state: "blocked",
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+    }
     if (this.dependencies.config.mode === "observe") {
       try {
         const observed = await this.dependencies.orchestrator.observe(signal);
@@ -405,7 +432,10 @@ export class MaintenanceCoordinator {
     }, Math.max(10, Math.min(1_000, Math.floor(ttl / 3))));
 
     try {
-      if (this.dependencies.intake.reconcileReservedOperations) {
+      if (
+        this.dependencies.executionScope !== "roadmap-only" &&
+        this.dependencies.intake.reconcileReservedOperations
+      ) {
         const intakeRecovery = await this.dependencies.intake.reconcileReservedOperations(
           controller.signal,
         );
@@ -419,6 +449,17 @@ export class MaintenanceCoordinator {
         if (reconciled) return reconciled;
         const continued = await this.dependencies.orchestrator.advanceActiveIssue(controller.signal);
         if (continued) return continued;
+      }
+
+      if (this.dependencies.executionScope === "roadmap-only") {
+        const selected = await this.dependencies.orchestrator.acquireNextIssue(controller.signal);
+        return selected.state === "idle"
+          ? {
+              action: "idle",
+              state: "idle",
+              detail: "No cold-start roadmap issue is ready",
+            }
+          : selected;
       }
 
       const promoted = await this.promoteOneUserIssue(controller.signal);

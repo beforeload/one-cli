@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.beforeload.one-cli-harness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_EXECUTABLE__</string>
+    <string>__REPOSITORY__/harness/dist/index.js</string>
+    <string>run</string>
+    <string>--workspace</string>
+    <string>__REPOSITORY__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPOSITORY__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ONE_CLI_HOME</key>
+    <string>__ONE_CLI_HOME__</string>
+    <key>ONE_CLI_HARNESS_ENV_FILE</key>
+    <string>__ONE_CLI_HOME__/harness.env</string>
+    <key>ONE_CLI_GH_EXECUTABLE</key>
+    <string>__GH_EXECUTABLE__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>

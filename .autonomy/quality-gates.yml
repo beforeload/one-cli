@@ -48,6 +48,8 @@ governance:
     - .autonomy/**
     - .github/workflows/**
     - .github/CODEOWNERS
+    - harness/**
+    - src/autonomy/roadmap-enforcement.ts
   executionAuthor: beforeload
   developmentAuthorMayOpenProposalIssueOnly: true
   proposalLabel: governance-proposal

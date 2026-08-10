@@ -34,7 +34,7 @@ jobs:
           protected=false
           while IFS= read -r -d '' path; do
             case "$path" in
-              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS)
+              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS | harness/* | src/autonomy/roadmap-enforcement.ts)
                 protected=true
                 printf 'Protected governance path changed: %s\n' "$path"
                 ;;

@@ -352,6 +352,64 @@ describe("MaintenanceCoordinator", () => {
       operationId: "intake-uncertain",
     });
   });
+
+  it("roadmap-only selects roadmap work without promotion, scan, or global dogfood", async () => {
+    const original = userIssue(9);
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const research = { scan: vi.fn(async () => []) };
+    const harness = createHarness({
+      issues: [original],
+      sources: [source],
+      research,
+      executionScope: "roadmap-only",
+    });
+    due(harness.store, "global-dogfood", harness.now());
+    due(harness.store, "community-scan", harness.now());
+    harness.orchestrator.acquireNextIssue.mockResolvedValue({
+      action: "select",
+      state: "issue_selected",
+      detail: "selected roadmap attempt",
+    });
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "select",
+      state: "issue_selected",
+    });
+    expect(harness.orchestrator.acquireNextIssue).toHaveBeenCalledTimes(1);
+    expect(harness.issueNormalizer.normalize).not.toHaveBeenCalled();
+    expect(harness.intake.promoteUserIssue).not.toHaveBeenCalled();
+    expect(harness.intake.promoteCommunityFinding).not.toHaveBeenCalled();
+    expect(research.scan).not.toHaveBeenCalled();
+    expect(harness.sandbox.run).not.toHaveBeenCalled();
+  });
+
+  it("fails closed without mutation for a legacy roadmap-only active attempt", async () => {
+    const harness = createHarness({ executionScope: "roadmap-only" });
+    harness.store.putRepo({ id: harness.config.repoKey, path: harness.config.repoRoot, now: 1 });
+    harness.store.putIssue({
+      id: "github-99",
+      repoId: harness.config.repoKey,
+      key: "99",
+      digest: "d".repeat(64),
+      now: 2,
+    });
+    harness.store.beginAttempt({
+      id: "legacy",
+      issueId: "github-99",
+      headSha: "a".repeat(40),
+      initialState: "pending",
+      detail: { issueNumber: 99 },
+      now: 3,
+    });
+    const beforeEvents = harness.store.listEvents({ limit: 10_000 }).length;
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "roadmap-scope",
+      state: "blocked",
+    });
+    expect(harness.store.listEvents({ limit: 10_000 })).toHaveLength(beforeEvents);
+    expect(harness.orchestrator.reconcile).not.toHaveBeenCalled();
+    expect(harness.orchestrator.advanceActiveIssue).not.toHaveBeenCalled();
+  });
 });
 
 function createHarness(options: {
@@ -364,6 +422,7 @@ function createHarness(options: {
   findingNormalizerError?: Error;
   communityPromotionError?: Error;
   now?: number;
+  executionScope?: "normal" | "roadmap-only";
 } = {}) {
   const store = new AutonomyStore(":memory:");
   stores.push(store);
@@ -443,6 +502,9 @@ function createHarness(options: {
     issueNormalizer,
     findingNormalizer,
     ...(options.research === undefined ? {} : { research: options.research }),
+    ...(options.executionScope === undefined
+      ? {}
+      : { executionScope: options.executionScope }),
     now,
     id: (() => {
       let value = 0;

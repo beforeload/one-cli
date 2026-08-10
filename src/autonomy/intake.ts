@@ -17,6 +17,7 @@ export const SELF_DISCOVERY_SOURCE_LABEL = "source:self-discovery";
 export const AGENT_READY_LABEL = "agent-ready";
 export const MAINTAINER_ACCEPTED_LABEL = "maintainer-accepted";
 export const APPROVED_PATHS_BINDING_PREFIX = "Trusted approved paths (exact JSON): ";
+export const COLD_START_ROADMAP_LABEL = "cold-start-roadmap";
 export const COMMUNITY_SCHEMA = "autonomy.one-cli/community-v2";
 export const COMMUNITY_SOURCE_IDS = [
   "qwen-code",
@@ -370,6 +371,16 @@ export function parseApprovedPathBinding(
     return undefined;
   }
   return scope;
+}
+
+export function hasApprovedPathBindingMarker(
+  fields: Readonly<Record<string, string>>,
+): boolean {
+  return [fields.scope, fields.acceptanceCriteria, fields.sourceLinkOrEvidence].some(
+    (value) => value?.split(/\r?\n/u).some(
+      (line) => line.startsWith(APPROVED_PATHS_BINDING_PREFIX),
+    ) === true,
+  );
 }
 
 export function executionMarker(idempotencyKey: string): string {

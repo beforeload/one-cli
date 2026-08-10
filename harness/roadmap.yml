@@ -1,0 +1,218 @@
+schema: one-cli.cold-start-roadmap/v1
+allowedNewPaths: []
+parent:
+  title: Production coding-agent CLI cold-start roadmap
+  labels: [enhancement, parent, "priority:p2"]
+  seedMarker: "<!-- one-cli:cold-start-seed:parent:v1 -->"
+children:
+  - id: 01-semantic-coherence
+    title: Reliability semantic coherence and impossible attempts
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:01-semantic-coherence:v1 -->"
+    approvedPaths:
+      - src/autonomy/gap.ts
+      - tests/unit/autonomy-gap.test.ts
+      - tests/unit/autonomy-maintenance.test.ts
+      - tests/unit/autonomy-orchestrator.test.ts
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 1; deterministic local evidence and the roadmap seed marker identify this work."
+      problemStatement: "Gap promotion can be semantically inconsistent with local capability evidence, and impossible attempts can remain recoverable when no valid implementation path exists."
+      userValue: "Users receive only coherent, implementable maintenance work and terminal outcomes for impossible requests."
+      scope: "Reject semantically incoherent promotions and terminate proven-impossible attempts within the exact approved path binding."
+      nonGoals: "Do not add providers, interactive UX, extensions, or platform backends."
+      acceptanceCriteria: "Inconsistent findings are ineligible; impossible attempts terminate with durable evidence; valid reliability work remains executable."
+      testPlan: "Add deterministic success, inconsistency, and impossible-attempt tests with no live provider or GitHub calls."
+      dogfoodPlan: "Run unit, integration, smoke, and an exact-SHA post-merge autonomy status check."
+      riskAndSecurityNotes: "Fail closed on ambiguous evidence and preserve leases, claims, and immutable issue authority."
+      duplicateSearchEvidence: "The roadmap manifest, open and closed issue markers, pull requests, and local gap taxonomy are checked before seeding."
+      parentChildRelationship: "Child 1 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "First child; no roadmap dependency."
+  - id: 02-lease-heartbeat
+    title: Deterministic lease heartbeat
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:02-lease-heartbeat:v1 -->"
+    approvedPaths:
+      - src/autonomy/lease.ts
+      - src/autonomy/store.ts
+      - tests/unit/autonomy-store.test.ts
+      - tests/unit/autonomy-orchestrator.test.ts
+      - tests/unit/autonomy-maintenance.test.ts
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 2; flaky heartbeat evidence is reproduced with a deterministic clock and barrier."
+      problemStatement: "Lease heartbeat behavior and tests depend on wall-clock scheduling, allowing timing races and unstable CI."
+      userValue: "Long autonomous work keeps ownership predictably and CI reports deterministic outcomes."
+      scope: "Make heartbeat scheduling and lease renewal testable with deterministic time and synchronization."
+      nonGoals: "Do not weaken fencing, increase authority, or bypass lease loss."
+      acceptanceCriteria: "Heartbeat and lease-loss behavior are deterministic under fake time, and no timing-sensitive sleeps remain in the affected tests."
+      testPlan: "Use fake clock and explicit barriers for renewal, cancellation, conflict, and lost-lease cases."
+      dogfoodPlan: "Run the heartbeat suite repeatedly, then full check and exact-SHA post-merge dogfood."
+      riskAndSecurityNotes: "A stale owner must never renew or release a newer fenced lease."
+      duplicateSearchEvidence: "Existing lease tests and CI failure evidence were inspected; this child is marker-deduplicated."
+      parentChildRelationship: "Child 2 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 1 delivery."
+  - id: 03-context-compaction
+    title: Deterministic context compaction
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:03-context-compaction:v1 -->"
+    approvedPaths:
+      - src/agent.ts
+      - src/domain.ts
+      - src/session.ts
+      - src/config.ts
+      - tests/unit/agent.test.ts
+      - tests/unit/session.test.ts
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 3; long-session behavior is bound to append-only session evidence."
+      problemStatement: "Long sessions can exceed context limits without deterministic compaction or durable preservation of tool receipts."
+      userValue: "Users can continue long coding sessions without losing critical tool evidence or corrupting resume behavior."
+      scope: "Add deterministic context compaction that preserves system constraints, recent turns, and tool-call receipts."
+      nonGoals: "Do not add a REPL, provider fallback, or lossy session rewriting."
+      acceptanceCriteria: "Bounded context is deterministic, tool-call/result pairing survives compaction, and append-only resume remains valid."
+      testPlan: "Cover threshold boundaries, repeated compaction, tool receipt retention, torn tails, and deterministic replay."
+      dogfoodPlan: "Run a synthetic long session through text and JSONL modes, resume it, then run full gates."
+      riskAndSecurityNotes: "Never summarize away approval decisions, authority boundaries, or unresolved tool operations."
+      duplicateSearchEvidence: "Agent and session implementations plus existing tests were checked; marker search prevents duplicate seeding."
+      parentChildRelationship: "Child 3 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 2 delivery."
+  - id: 04-provider-profiles
+    title: Provider profiles fallback and budget
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:04-provider-profiles:v1 -->"
+    approvedPaths:
+      - src/provider.ts
+      - src/config.ts
+      - src/agent.ts
+      - src/cli.ts
+      - src/domain.ts
+      - tests/unit/agent.test.ts
+      - tests/integration/cli.test.ts
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 4; provider configuration and budget evidence are locally testable."
+      problemStatement: "A single provider configuration lacks named profiles, bounded fallback, and unified token, cost, and wall-time budgets."
+      userValue: "Users can run reliably across compatible providers while keeping cost and time bounded."
+      scope: "Add validated provider profiles, deterministic fallback policy, and observable token, cost, and wall-time budgets."
+      nonGoals: "Do not silently retry unsafe operations or store provider secrets in the repository."
+      acceptanceCriteria: "Profiles validate strictly; fallback occurs only for classified transient failures; all budgets stop work deterministically."
+      testPlan: "Use scripted providers for profile validation, fallback ordering, non-retryable failures, and each budget limit."
+      dogfoodPlan: "Run fake-provider integration scenarios and a credential-free CLI configuration smoke test."
+      riskAndSecurityNotes: "Redact secrets, bound retry amplification, and preserve tool idempotency across fallback."
+      duplicateSearchEvidence: "Current provider/config surfaces and existing issues are checked before marker-based reconciliation."
+      parentChildRelationship: "Child 4 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 3 delivery."
+  - id: 05-bounded-search
+    title: Bounded glob regex and ignore rules
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:05-bounded-search:v1 -->"
+    approvedPaths:
+      - src/workspace.ts
+      - src/tools.ts
+      - src/policy.ts
+      - tests/unit/workspace.test.ts
+      - tests/unit/tools.test.ts
+      - tests/unit/policy.test.ts
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 5; workspace traversal and search limits provide deterministic evidence."
+      problemStatement: "Workspace search supports literal grep but lacks bounded glob, safe regex, and project ignore behavior."
+      userValue: "Agents inspect large repositories precisely without hangs, irrelevant generated files, or unbounded output."
+      scope: "Add bounded glob and regex search with deterministic ignore rules, file, match, byte, and deadline limits."
+      nonGoals: "Do not invoke shell search tools or follow symlinks."
+      acceptanceCriteria: "Glob and regex results are deterministic, ignored paths stay excluded, and every resource limit fails safely."
+      testPlan: "Cover malformed regex, catastrophic patterns, ignore precedence, symlinks, binary files, and all bounds."
+      dogfoodPlan: "Search this repository with representative glob and regex queries, then run full gates."
+      riskAndSecurityNotes: "Prevent traversal, regex denial of service, symlink escape, and oversized result disclosure."
+      duplicateSearchEvidence: "Workspace and tool capabilities plus issue history are checked; the seed marker is unique."
+      parentChildRelationship: "Child 5 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 4 delivery."
+  - id: 06-interactive-session
+    title: Interactive REPL and session picker
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:06-interactive-session:v1 -->"
+    approvedPaths:
+      - src/cli.ts
+      - src/session.ts
+      - src/reporter.ts
+      - src/approval.ts
+      - tests/unit/session.test.ts
+      - tests/integration/cli.test.ts
+      - tests/smoke/smoke.test.ts
+      - README.md
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 6; existing session and approval contracts anchor interactive behavior."
+      problemStatement: "The CLI lacks a recoverable interactive loop, session picker, and concise approval and diff experience."
+      userValue: "Users can navigate, resume, inspect, approve, and continue coding sessions from one terminal workflow."
+      scope: "Add a TTY-only REPL, bounded session picker, and clear approval/diff prompts while preserving non-TTY behavior."
+      nonGoals: "Do not create a full-screen IDE or weaken non-interactive fail-closed approvals."
+      acceptanceCriteria: "Interactive sessions resume safely, selection is deterministic, and approval/diff UX remains auditable."
+      testPlan: "Use fake TTY streams for picker, cancellation, resume, approval, diff, and non-TTY rejection."
+      dogfoodPlan: "Run an interactive local smoke workflow and verify existing JSONL automation remains unchanged."
+      riskAndSecurityNotes: "Never echo secrets; avoid terminal injection; retain explicit approval boundaries."
+      duplicateSearchEvidence: "CLI/session behavior and issue history were inspected; seed marker reconciliation is authoritative."
+      parentChildRelationship: "Child 6 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 5 delivery."
+  - id: 07-extension-health
+    title: Trust-gated MCP Hook health inventory
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:07-extension-health:v1 -->"
+    approvedPaths:
+      - src/config.ts
+      - src/domain.ts
+      - src/tools.ts
+      - src/policy.ts
+      - src/cli.ts
+      - tests/unit/tools.test.ts
+      - tests/unit/policy.test.ts
+      - tests/integration/cli.test.ts
+      - README.md
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 7; extension inventory is configuration-derived and credential-free."
+      problemStatement: "The CLI cannot inventory MCP servers, hooks, and extension health under an explicit trust policy."
+      userValue: "Users can understand which extensions are configured, healthy, trusted, and disabled before use."
+      scope: "Add strict trust-gated MCP and Hook configuration plus read-only bounded health inventory."
+      nonGoals: "Do not auto-trust extensions, execute issue-supplied hooks, or grant extension authority."
+      acceptanceCriteria: "Untrusted extensions stay disabled; health status is bounded and structured; failures cannot block core inspection."
+      testPlan: "Use fake extension processes for trust, timeout, malformed output, cancellation, and health aggregation."
+      dogfoodPlan: "Inventory a credential-free fake MCP and Hook setup, then run full gates."
+      riskAndSecurityNotes: "No shell, strict environment, bounded output/time, explicit trust, and secret-safe status."
+      duplicateSearchEvidence: "Current tools/policy/config surfaces and all issue markers are searched before seeding."
+      parentChildRelationship: "Child 7 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 6 delivery."
+  - id: 08-linux-release
+    title: Linux sandbox and cross-platform release
+    labels: [enhancement, cold-start-roadmap, "priority:p1"]
+    trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
+    seedMarker: "<!-- one-cli:cold-start-seed:08-linux-release:v1 -->"
+    approvedPaths:
+      - src/autonomy/sandbox.ts
+      - src/autonomy/release.ts
+      - src/autonomy/config.ts
+      - tests/unit/autonomy-release.test.ts
+      - tests/unit/autonomy-config.test.ts
+      - README.md
+    fields:
+      sourceType: cold-start-roadmap
+      sourceLinkOrEvidence: "Trusted cold-start roadmap child 8; platform support requires sandbox and release evidence on each target."
+      problemStatement: "Autonomy sandboxing is Darwin-only and release verification lacks a cross-platform CI contract."
+      userValue: "Linux users can run autonomy with fail-closed isolation and verify the same release artifacts."
+      scope: "Add a Linux sandbox backend, platform selection, and verifiable cross-platform release readiness without changing governance or CI workflows."
+      nonGoals: "Do not treat a missing sandbox as success, modify governance or CI, or implement a workflow matrix; any future workflow matrix is a governance proposal only."
+      acceptanceCriteria: "Darwin and Linux isolation fail closed in deterministic local tests, release readiness is verifiable on both platforms, and release evidence remains exact-SHA bound without governance or CI changes."
+      testPlan: "Use backend fakes and local platform abstractions for availability, denial, timeout, cancellation, and release binding; record any workflow matrix as a governance proposal only."
+      dogfoodPlan: "Run install, build, integration, and smoke on Darwin and Linux exact artifacts."
+      riskAndSecurityNotes: "Workflow governance changes require maintainer approval; sandbox degradation and secret leakage are forbidden."
+      duplicateSearchEvidence: "Sandbox, release, CI, open and closed issues, and pull requests are checked before seeding."
+      parentChildRelationship: "Child 8 of Production coding-agent CLI cold-start roadmap."
+      dependencyOrder: "Depends on child 7 delivery."
