@@ -51,9 +51,9 @@ Research, triage, and dogfood create Issues; they do not fix findings inline.
 4. Run only the configured local commands: `npm ci`, `npm run build`,
    `npm run typecheck`, `npm test`, `npm run test:integration`, and the
    configured smoke command.
-5. Require the GitHub check named `verify`, a current clean branch, complete
-   evidence, secret and dependency review, and independent self-review with no
-   unresolved critical finding before merge.
+5. Require the GitHub checks named `verify` and
+   `one-cli/independent-verifier`, both pinned to the built-in GitHub Actions
+   App ID `15368`, plus a SHA-bound `github-actions[bot]` review before merge.
 6. Reconcile the generated merge commit and run targeted post-merge dogfood on
    changed user paths before releasing the lease or closing the source Issue.
 7. Fingerprint code failures by operation, exit code, and normalized error.
@@ -70,14 +70,45 @@ The protected paths are:
 
 - `AUTONOMY.md`;
 - `.autonomy/**`;
-- `.github/workflows/**`; and
-- `.github/CODEOWNERS`.
+- `.github/workflows/**`;
+- `.github/CODEOWNERS`;
+- `harness/**`;
+- `.npmrc`, whether or not it is currently present;
+- `package.json` and `package-lock.json`;
+- `scripts/independent-verifier.mjs`, `scripts/validate-autonomy.mjs`, and
+  `scripts/validate-harness.mjs`; and
+- `tsconfig.json` and `tsconfig.build.json`.
 
-The execution author may read these files and open a `governance-proposal`
-Issue, but an execution pull request authored by `beforeload` must never modify
-them. Because `beforeload` is also the repository owner and no independent
-governance principal is configured, labels and self-review cannot safely grant
-an exception. The repository workflow therefore fails closed.
+`harness/**` includes the verifier policy, verifier runtime modules, and
+`harness/tsconfig.json`. Together these paths protect the complete dependency,
+build-configuration, policy, workflow, and runtime closure loaded from the
+trusted base before verifier secrets are made available. Ordinary product files
+under `src/**` are not protected merely because the trusted checkout is built.
+
+Every pull request, normal or protected, is verified by the trusted
+`pull_request_target` workflow loaded from the exact default-branch base SHA.
+The pull head is checked out separately as untrusted data and is never executed
+in the secret-bearing job. Protected evidence is the complete bounded git diff
+between pinned base and head objects; REST patch text is not authoritative.
+Labels, issue text, pull text, worker self-review, and model output never grant
+an exception. After the one-time exact-SHA bootstrap, branch protection
+requires exactly `verify` and `one-cli/independent-verifier`;
+`protected-paths` is non-required informational evidence. Repository Actions
+must be allowed to approve pull request reviews. Local governance readiness
+must prove strict status checks, admin enforcement, disabled force pushes and
+deletions, exact App-pinned checks, stale-review dismissal, at least one
+approval, and last-push approval before product execution.
+
+The verifier uses GitHub's ephemeral workflow token and built-in GitHub Actions
+App identity; there is no custom App, local verifier key, or repository secret.
+Two distinct GitHub Models profiles use that token and are veto-only with 2-of-2
+non-veto required; deterministic checks alone establish eligibility. The first
+job submits an exact-head review and must complete before a second job
+revalidates repository identity and `default_branch`, the live default-branch
+head, base SHA, head SHA, required-check App provenance, review actor/commit,
+and mergeability, then merges with an exact-SHA precondition. The workflow token
+does not call branch-protection or ruleset APIs; GitHub's merge API enforces the
+live protection rules. No runtime path may change or lower branch protection.
 
 Tracked content must not contain credentials, tokens, host-private paths,
 runtime ledgers, checkpoints, task identifiers, or reporting endpoints.

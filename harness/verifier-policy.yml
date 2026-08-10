@@ -1,0 +1,68 @@
+schema: one-cli.independent-verifier/v4
+
+repository:
+  owner: beforeload
+  name: one-cli
+  defaultBranch: main
+
+workflow:
+  path: .github/workflows/independent-verifier.yml
+  event: pull_request_target
+  blobSha: ea333ef8320ac39b2cd9a0f618cc98e7149f680f
+  policyVersion: one-cli.independent-verifier/v4
+
+requiredChecks:
+  - name: verify
+    appId: 15368
+  - name: one-cli/independent-verifier
+    appId: 15368
+
+emittedCheck:
+  name: one-cli/independent-verifier
+  appId: 15368
+
+reviewIdentity:
+  appId: 15368
+  appSlug: github-actions
+  actor: github-actions[bot]
+
+protectedPaths:
+  exact:
+    - AUTONOMY.md
+    - .github/CODEOWNERS
+    - .npmrc
+    - package.json
+    - package-lock.json
+    - scripts/independent-verifier.mjs
+    - scripts/validate-autonomy.mjs
+    - scripts/validate-harness.mjs
+    - tsconfig.json
+    - tsconfig.build.json
+    - harness/tsconfig.json
+  prefixes:
+    - .autonomy/
+    - .github/workflows/
+    - harness/
+
+semanticReview:
+  quorum: 2
+  baseUrl: https://models.github.ai/inference/
+  tokenEnvironment: GITHUB_TOKEN
+  profiles:
+    - id: verifier-profile-a
+      modelEnvironment: ONE_CLI_VERIFIER_MODEL_A
+      defaultModel: openai/gpt-4.1
+    - id: verifier-profile-b
+      modelEnvironment: ONE_CLI_VERIFIER_MODEL_B
+      defaultModel: openai/gpt-4.1-mini
+
+limits:
+  maxChangedFiles: 300
+  maxDiffBytes: 1048576
+  maxModelOutputBytes: 16384
+  requestTimeoutMs: 60000
+  verifyWaitMs: 1200000
+
+merge:
+  enabled: true
+  method: merge

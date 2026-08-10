@@ -19,7 +19,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Enforce fail-closed protected paths
+      - name: Report protected paths
+        # The pre-bootstrap required job used "exit 1"; post-bootstrap this is informational.
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -34,7 +35,10 @@ jobs:
           protected=false
           while IFS= read -r -d '' path; do
             case "$path" in
-              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS | harness/* | src/autonomy/roadmap-enforcement.ts)
+              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS | harness/* | \
+              .npmrc | package.json | package-lock.json | scripts/independent-verifier.mjs | \
+              scripts/validate-autonomy.mjs | scripts/validate-harness.mjs | tsconfig.json | \
+              tsconfig.build.json | src/autonomy/roadmap-enforcement.ts)
                 protected=true
                 printf 'Protected governance path changed: %s\n' "$path"
                 ;;
@@ -42,9 +46,8 @@ jobs:
           done < "$changed_file"
 
           if [[ "$PR_AUTHOR" == "beforeload" && "$protected" == "true" ]]; then
-            echo "beforeload-authored pull requests cannot change protected governance paths."
-            echo "No label bypass exists because execution and ownership share one principal."
-            exit 1
+            echo "::warning::beforeload-authored pull request changes protected governance paths."
+            echo "This job is informational; the exact-SHA independent verifier enforces approved paths."
           fi
 
-          echo "Governance policy passed for $PR_AUTHOR."
+          echo "Protected-path inventory completed for $PR_AUTHOR."

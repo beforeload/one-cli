@@ -12,6 +12,7 @@ const requiredFiles = [
   ".autonomy/product.yml",
   ".autonomy/issue-policy.yml",
   ".autonomy/quality-gates.yml",
+  ".autonomy/recovery-policy.yml",
   ".autonomy/community.yml",
   ".autonomy/gap-policy.yml",
   ".autonomy/prompts/coordinator.md",
@@ -21,10 +22,21 @@ const requiredFiles = [
   ".github/ISSUE_TEMPLATE/bug.yml",
   ".github/ISSUE_TEMPLATE/feature.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
+  "harness/verifier-policy.yml",
 ];
 
 const failures = [];
 const documents = new Map();
+const trustedVerifierExactPaths = [
+  ".npmrc",
+  "package.json",
+  "package-lock.json",
+  "scripts/independent-verifier.mjs",
+  "scripts/validate-autonomy.mjs",
+  "scripts/validate-harness.mjs",
+  "tsconfig.json",
+  "tsconfig.build.json",
+];
 
 for (const relativePath of requiredFiles) {
   const absolutePath = path.join(root, relativePath);
@@ -62,6 +74,7 @@ for (const file of [
 }
 requireText(".autonomy/community.yml", "schema: autonomy.one-cli/community-v2");
 requireText(".autonomy/gap-policy.yml", "schema: autonomy.one-cli/gap-policy-v1");
+requireText(".autonomy/recovery-policy.yml", "schema: autonomy.one-cli/recovery-policy-v1");
 
 for (const [file, values] of Object.entries({
   ".autonomy/product.yml": [
@@ -91,11 +104,13 @@ for (const [file, values] of Object.entries({
   ],
   ".autonomy/quality-gates.yml": [
     "    - verify",
+    "    - one-cli/independent-verifier",
     "    - AUTONOMY.md",
     "    - .autonomy/**",
     "    - .github/workflows/**",
     "    - .github/CODEOWNERS",
     "    - harness/**",
+    ...trustedVerifierExactPaths.map((candidate) => `    - ${candidate}`),
     "exceptionMode: fail-closed",
     "strategy: merge",
     "detachedExactMergeWorktree: true",
@@ -108,6 +123,14 @@ for (const [file, values] of Object.entries({
     "findingTtlDays: 30",
     "governance: forbidden",
     "speculative: forbidden",
+  ],
+  ".autonomy/recovery-policy.yml": [
+    "redaction: strict",
+    "maxReceiptsPerAttempt: 20",
+    "requireOperationId: true",
+    "requireFailureFingerprint: true",
+    "deduplicateByHash: true",
+    "requireNovelEvidence: true",
   ],
   ".autonomy/prompts/coordinator.md": [
     "Execute exactly one bounded tick per invocation.",
@@ -188,6 +211,56 @@ if (
   failures.push(".autonomy/gap-policy.yml must use the closed ordered category taxonomy");
 }
 
+const recoveryPolicy = YAML.parse(documents.get(".autonomy/recovery-policy.yml") ?? "");
+const exactKeys = (value, expected, location) => {
+  const actual =
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value).sort()
+      : [];
+  if (actual.join("\n") !== [...expected].sort().join("\n")) {
+    failures.push(`${location} must use the strict closed recovery policy schema`);
+  }
+};
+exactKeys(
+  recoveryPolicy,
+  ["schema", "receipts", "machineEvidence", "manualBreakGlass"],
+  ".autonomy/recovery-policy.yml",
+);
+exactKeys(
+  recoveryPolicy?.receipts,
+  [
+    "maxStdoutBytes",
+    "maxStderrBytes",
+    "maxSpawnErrorBytes",
+    "maxReceiptsPerAttempt",
+    "redaction",
+  ],
+  ".autonomy/recovery-policy.yml receipts",
+);
+exactKeys(
+  recoveryPolicy?.machineEvidence,
+  [
+    "maxSummaryBytes",
+    "allowedSources",
+    "requireOperationId",
+    "requireFailureFingerprint",
+    "deduplicateByHash",
+  ],
+  ".autonomy/recovery-policy.yml machineEvidence",
+);
+exactKeys(
+  recoveryPolicy?.manualBreakGlass,
+  ["maxEvidenceBytes", "requireNovelEvidence"],
+  ".autonomy/recovery-policy.yml manualBreakGlass",
+);
+if (
+  recoveryPolicy?.receipts?.redaction !== "strict" ||
+  recoveryPolicy?.machineEvidence?.allowedSources?.join("\n") !==
+    ["local-process", "worker", "github-check", "reconciler"].join("\n")
+) {
+  failures.push(".autonomy/recovery-policy.yml must enforce strict redaction and closed sources");
+}
+
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(root, "package.json"), "utf8"),
 );
@@ -243,6 +316,7 @@ for (const protectedPath of [
   ".github/workflows/*",
   ".github/CODEOWNERS",
   "harness/*",
+  ...trustedVerifierExactPaths,
 ]) {
   requireText(".github/workflows/governance.yml", protectedPath);
 }
@@ -260,8 +334,35 @@ for (const codeownerPath of [
   "/.github/workflows/** @beforeload",
   "/.github/CODEOWNERS @beforeload",
   "/harness/** @beforeload",
+  ...trustedVerifierExactPaths.map((candidate) => `/${candidate} @beforeload`),
 ]) {
   requireText(".github/CODEOWNERS", codeownerPath);
+}
+
+const verifierPolicy = YAML.parse(documents.get("harness/verifier-policy.yml") ?? "");
+if (
+  verifierPolicy?.requiredChecks?.length !== 2 ||
+  verifierPolicy.requiredChecks.some((check) => check?.appId !== 15368) ||
+  verifierPolicy.requiredChecks[0]?.name !== "verify" ||
+  verifierPolicy.requiredChecks[1]?.name !== "one-cli/independent-verifier" ||
+  verifierPolicy?.reviewIdentity?.actor !== "github-actions[bot]"
+) {
+  failures.push("harness/verifier-policy.yml must pin both checks and review to GitHub Actions");
+}
+for (const protectedPath of [
+  "AUTONOMY.md",
+  ".github/CODEOWNERS",
+  "harness/tsconfig.json",
+  ...trustedVerifierExactPaths,
+]) {
+  if (!verifierPolicy?.protectedPaths?.exact?.includes(protectedPath)) {
+    failures.push(`harness/verifier-policy.yml must protect exact path: ${protectedPath}`);
+  }
+}
+for (const protectedPrefix of [".autonomy/", ".github/workflows/", "harness/"]) {
+  if (!verifierPolicy?.protectedPaths?.prefixes?.includes(protectedPrefix)) {
+    failures.push(`harness/verifier-policy.yml must protect prefix: ${protectedPrefix}`);
+  }
 }
 
 for (const template of [

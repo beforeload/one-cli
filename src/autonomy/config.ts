@@ -132,6 +132,53 @@ const QualityGatesSchema = z
   })
   .strict();
 
+export const RECOVERY_POLICY_SCHEMA = "autonomy.one-cli/recovery-policy-v1";
+export const RECOVERY_EVIDENCE_SOURCES = [
+  "local-process",
+  "worker",
+  "github-check",
+  "reconciler",
+] as const;
+export const RecoveryPolicySchema = z
+  .object({
+    schema: z.literal(RECOVERY_POLICY_SCHEMA),
+    receipts: z
+      .object({
+        maxStdoutBytes: z.number().int().min(256).max(64 * 1024),
+        maxStderrBytes: z.number().int().min(256).max(64 * 1024),
+        maxSpawnErrorBytes: z.number().int().min(128).max(8 * 1024),
+        maxReceiptsPerAttempt: z.number().int().min(1).max(100),
+        redaction: z.literal("strict"),
+      })
+      .strict(),
+    machineEvidence: z
+      .object({
+        maxSummaryBytes: z.number().int().min(64).max(16 * 1024),
+        allowedSources: z.tuple([
+          z.literal("local-process"),
+          z.literal("worker"),
+          z.literal("github-check"),
+          z.literal("reconciler"),
+        ]),
+        requireOperationId: z.literal(true),
+        requireFailureFingerprint: z.literal(true),
+        deduplicateByHash: z.literal(true),
+      })
+      .strict(),
+    manualBreakGlass: z
+      .object({
+        maxEvidenceBytes: z.number().int().min(64).max(16 * 1024),
+        requireNovelEvidence: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
+export type RecoveryPolicy = z.infer<typeof RecoveryPolicySchema>;
+
+export function parseRecoveryPolicy(input: unknown): RecoveryPolicy {
+  return RecoveryPolicySchema.parse(input);
+}
+
 export const GAP_POLICY_SCHEMA = "autonomy.one-cli/gap-policy-v1";
 const ProtectedPathSchema = z
   .string()
@@ -210,6 +257,7 @@ export interface AutonomyConfig {
   product: z.infer<typeof ProductSchema>;
   issuePolicy: z.infer<typeof IssuePolicySchema>;
   qualityGates: z.infer<typeof QualityGatesSchema>;
+  recoveryPolicy: RecoveryPolicy;
   community: CommunityRegistry;
   gapPolicy: GapPolicy;
   commands: Readonly<Record<string, ConfiguredCommand>>;
@@ -229,12 +277,14 @@ export function loadAutonomyConfig(
   const productValue = readYaml(path.join(directory, "product.yml"));
   const issuePolicyValue = readYaml(path.join(directory, "issue-policy.yml"));
   const qualityGatesValue = readYaml(path.join(directory, "quality-gates.yml"));
+  const recoveryPolicyValue = readYaml(path.join(directory, "recovery-policy.yml"));
   const communityValue = readYaml(path.join(directory, "community.yml"));
   const gapPolicyValue = readYaml(path.join(directory, "gap-policy.yml"));
   rejectSecretKeys({
     productValue,
     issuePolicyValue,
     qualityGatesValue,
+    recoveryPolicyValue,
     communityValue,
     gapPolicyValue,
   });
@@ -242,6 +292,7 @@ export function loadAutonomyConfig(
   const product = ProductSchema.parse(productValue);
   const issuePolicy = IssuePolicySchema.parse(issuePolicyValue);
   const qualityGates = QualityGatesSchema.parse(qualityGatesValue);
+  const recoveryPolicy = parseRecoveryPolicy(recoveryPolicyValue);
   const community = parseCommunityRegistry(communityValue);
   const gapPolicy = parseGapPolicy(gapPolicyValue);
   if (
@@ -290,13 +341,21 @@ export function loadAutonomyConfig(
     repoRoot: canonicalRoot,
     repoKey,
     stateRoot,
-    policyHash: policyHash({ product, issuePolicy, qualityGates, community, gapPolicy }),
+    policyHash: policyHash({
+      product,
+      issuePolicy,
+      qualityGates,
+      recoveryPolicy,
+      community,
+      gapPolicy,
+    }),
     researchPolicyHash: policyHash({ community, gapPolicy }),
     maximumMode,
     mode,
     product,
     issuePolicy,
     qualityGates,
+    recoveryPolicy,
     community,
     gapPolicy,
     commands,

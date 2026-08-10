@@ -1,0 +1,122 @@
+name: independent-verifier
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+env:
+  ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4
+
+concurrency:
+  group: independent-verifier-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  verifier:
+    name: one-cli/independent-verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: write
+      models: read
+    steps:
+      - name: Check out exact trusted base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up trusted Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: trusted/package-lock.json
+
+      - name: Install exact trusted dependencies
+        working-directory: trusted
+        run: npm ci --ignore-scripts
+
+      - name: Build exact trusted verifier
+        working-directory: trusted
+        run: npm run build
+
+      - name: Check out untrusted pull data
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          path: untrusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      # This job is the required one-cli/independent-verifier check. Untrusted
+      # files are read only by bounded git commands; none are executed.
+      - name: Verify exact pull and submit bound review
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_ROOT: ${{ github.workspace }}/trusted
+          UNTRUSTED_ROOT: ${{ github.workspace }}/untrusted
+          ONE_CLI_VERIFIER_MODEL_A: ${{ vars.ONE_CLI_VERIFIER_MODEL_A || 'openai/gpt-4.1' }}
+          ONE_CLI_VERIFIER_MODEL_B: ${{ vars.ONE_CLI_VERIFIER_MODEL_B || 'openai/gpt-4.1-mini' }}
+        run: >-
+          node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"
+          --event "$GITHUB_EVENT_PATH"
+          --trusted-root "$TRUSTED_ROOT"
+          --untrusted-root "$UNTRUSTED_ROOT"
+          --verify
+
+  merge:
+    name: merge-exact-verified-head
+    needs: verifier
+    if: needs.verifier.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Check out exact trusted base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up trusted Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: trusted/package-lock.json
+
+      - name: Install exact trusted dependencies
+        working-directory: trusted
+        run: npm ci --ignore-scripts
+
+      - name: Build exact trusted merger
+        working-directory: trusted
+        run: npm run build
+
+      - name: Revalidate and merge exact verified head
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_ROOT: ${{ github.workspace }}/trusted
+        run: >-
+          node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"
+          --event "$GITHUB_EVENT_PATH"
+          --trusted-root "$TRUSTED_ROOT"
+          --merge

@@ -143,7 +143,7 @@ describe("AutonomyOrchestrator", () => {
   );
 
   it("requires critical approvals before gates and publish", async () => {
-    const harness = createHarness("auto-pr", roots, { changedPath: "package.json" });
+    const harness = createHarness("auto-pr", roots, { changedPath: "scripts/release.mjs" });
     try {
       await harness.tick();
       await harness.tick();
@@ -942,6 +942,14 @@ function createHarness(
           conclusion,
           detailsUrl: "https://example.test/checks/1",
         },
+        {
+          id: 2,
+          name: "one-cli/independent-verifier",
+          headSha: options.staleCheck ? "d".repeat(40) : exactHead,
+          status: "completed",
+          conclusion,
+          detailsUrl: "https://example.test/checks/2",
+        },
       ] satisfies GitHubCheck[];
     },
     async mergePullRequest() {
@@ -960,7 +968,7 @@ function createHarness(
         defaultBranch: "main",
         canPush: true,
         branchProtected: true,
-        requiredCheckNames: ["verify"],
+        requiredCheckNames: ["verify", "one-cli/independent-verifier"],
       };
     },
     async createComment() {
