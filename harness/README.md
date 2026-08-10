@@ -80,6 +80,8 @@ All mutable state is under `$ONE_CLI_HOME/harness` (default
 reservations, the single-instance lock, and launchd output. No host state
 belongs in the repository. `ONE_CLI_HOME`, the environment file, and active
 release paths must be canonical, non-symlink paths under that private root.
+The journal rolls into bounded, hash-chained segments without losing sequence
+or tamper evidence during long unattended runs.
 Active releases are resolved only from
 `$ONE_CLI_HOME/autonomy/<repo-key>/releases`.
 
