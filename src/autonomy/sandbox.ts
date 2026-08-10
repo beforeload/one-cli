@@ -192,10 +192,15 @@ export function buildDarwinSandboxProfile(
     path.dirname(path.dirname(executable)),
     ...runtimeRoots.filter((root) => path.isAbsolute(root) && !root.includes("\0")),
   ]);
+  const traversalRoots = unique(readRoots.flatMap(pathAncestors));
   return [
     "(version 1)",
     "(deny default)",
     network ? "(allow network-outbound)" : "(deny network*)",
+    '(allow file-read-data (literal "/"))',
+    ...traversalRoots.map((root) =>
+      `(allow file-read-metadata (literal ${profileString(root)}))`
+    ),
     ...readRoots.map((root) =>
       root === executable
         ? `(allow file-read* (literal ${profileString(root)}))`
@@ -228,6 +233,16 @@ function defaultRuntimeRoots(): string[] {
     nodeDirectory,
     path.dirname(nodeDirectory),
   ];
+}
+
+function pathAncestors(candidate: string): string[] {
+  const ancestors: string[] = [];
+  let current = path.resolve(candidate);
+  while (current !== path.dirname(current)) {
+    current = path.dirname(current);
+    ancestors.push(current);
+  }
+  return ancestors;
 }
 
 function unique(values: readonly string[]): string[] {
