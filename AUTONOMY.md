@@ -101,6 +101,10 @@ approval, and last-push approval before product execution.
 
 The verifier uses GitHub's ephemeral workflow token and built-in GitHub Actions
 App identity; there is no custom App, local verifier key, or repository secret.
+Applied verification requires the exact Actions and repository context, the
+trusted workflow blob and canonical policy hash, and, when `/user` is
+available, `github-actions[bot]` user ID `41898282`. It never queries
+`/installation` or an administration API.
 Two distinct GitHub Models profiles use that token and are veto-only with 2-of-2
 non-veto required; deterministic checks alone establish eligibility. The first
 job submits an exact-head review and must complete before a second job

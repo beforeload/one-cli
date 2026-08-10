@@ -8,8 +8,9 @@ repository:
 workflow:
   path: .github/workflows/independent-verifier.yml
   event: pull_request_target
-  blobSha: ea333ef8320ac39b2cd9a0f618cc98e7149f680f
+  blobSha: 2fd8d9fc62f77f6c67c9a52891a06f85c0e95aea
   policyVersion: one-cli.independent-verifier/v4
+  policyHash: f184299b1bb65516ef6fb3e2afd76ec2474f224990f07472e1ef1b98eb0dce9f
 
 requiredChecks:
   - name: verify
@@ -23,8 +24,8 @@ emittedCheck:
 
 reviewIdentity:
   appId: 15368
-  appSlug: github-actions
   actor: github-actions[bot]
+  actorId: 41898282
 
 protectedPaths:
   exact:

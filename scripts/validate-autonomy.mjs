@@ -345,7 +345,9 @@ if (
   verifierPolicy.requiredChecks.some((check) => check?.appId !== 15368) ||
   verifierPolicy.requiredChecks[0]?.name !== "verify" ||
   verifierPolicy.requiredChecks[1]?.name !== "one-cli/independent-verifier" ||
-  verifierPolicy?.reviewIdentity?.actor !== "github-actions[bot]"
+  verifierPolicy?.reviewIdentity?.actor !== "github-actions[bot]" ||
+  verifierPolicy?.reviewIdentity?.actorId !== 41898282 ||
+  !/^[0-9a-f]{64}$/u.test(verifierPolicy?.workflow?.policyHash ?? "")
 ) {
   failures.push("harness/verifier-policy.yml must pin both checks and review to GitHub Actions");
 }

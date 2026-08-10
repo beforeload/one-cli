@@ -108,6 +108,7 @@ describe("live governance readiness gate", () => {
       "workflow-path",
       "workflow-blob",
       "workflow-policy-version",
+      "workflow-policy-hash",
       "actions-can-approve-pull-request-reviews",
       "protection-strict",
       "protection-enforce-admins",

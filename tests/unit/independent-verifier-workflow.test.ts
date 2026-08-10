@@ -33,6 +33,7 @@ describe("independent verifier trusted workflow", () => {
     );
     expect(workflow).not.toContain("checks: write");
     expect(workflow).not.toContain("administration:");
+    expect(workflow).toMatch(/ONE_CLI_VERIFIER_POLICY_SHA256: [0-9a-f]{64}/u);
   });
 
   it("uses two distinct GitHub Models defaults without repository secrets", () => {
@@ -67,6 +68,8 @@ describe("independent verifier trusted workflow", () => {
 
   it("never calls branch-protection or ruleset endpoints from the trusted workflow token", () => {
     expect(script).not.toMatch(/branches\/[^/]+\/protection|\/rulesets/u);
+    expect(script).not.toContain('"/installation"');
+    expect(script).not.toMatch(/\/actions\/permissions/u);
     expect(script).not.toContain("assertStrictProtection");
   });
 
@@ -110,19 +113,68 @@ describe("independent verifier trusted workflow", () => {
     expect(reviewWrite).toBeGreaterThan(tokenRead);
   });
 
-  it("rejects a token not issued by the built-in GitHub Actions App", async () => {
+  it("authenticates the exact Actions context and optional pinned bot user", async () => {
     const verifier = await verifierModule();
+    const policy = verifierPolicy();
+    const binding = pullBinding("a".repeat(40), "b".repeat(40));
+    const calls: string[] = [];
     const github = {
+      request: async (_method: string, apiPath: string) => {
+        calls.push(apiPath);
+        return {
+          login: "github-actions[bot]",
+          id: 41898282,
+          type: "Bot",
+        };
+      },
+    };
+    const environment = {
+      GITHUB_ACTIONS: "true",
+      GITHUB_REPOSITORY: "beforeload/one-cli",
+      GITHUB_EVENT_NAME: "pull_request_target",
+      GITHUB_ACTOR: "untrusted-pull-author",
+    };
+    await expect(verifier.assertTrustedActionsContext(
+      github,
+      policy,
+      binding,
+      environment,
+    )).resolves.toBeUndefined();
+    expect(calls).toEqual(["/user"]);
+
+    const wrongActor = {
       request: async () => ({
-        app_id: 4242,
-        app_slug: "one-cli-verifier",
+        login: "github-actions[bot]",
+        id: 4242,
+        type: "Bot",
       }),
     };
-    await expect(verifier.assertInstallationIdentity(
+    await expect(verifier.assertTrustedActionsContext(
+      wrongActor,
+      policy,
+      binding,
+      environment,
+    )).rejects.toThrow("pinned GitHub Actions bot");
+    await expect(verifier.assertTrustedActionsContext(
       github,
-      "15368",
-      "github-actions",
-    )).rejects.toThrow("pinned App ID and slug");
+      policy,
+      binding,
+      { ...environment, GITHUB_REPOSITORY: "fork/one-cli" },
+    )).rejects.toThrow("exact trusted GitHub Actions context");
+  });
+
+  it("accepts unavailable optional user identity without installation introspection", async () => {
+    const verifier = await verifierModule();
+    await expect(verifier.assertTrustedActionsContext(
+      { request: async () => undefined },
+      verifierPolicy(),
+      pullBinding("a".repeat(40), "b".repeat(40)),
+      {
+        GITHUB_ACTIONS: "true",
+        GITHUB_REPOSITORY: "beforeload/one-cli",
+        GITHUB_EVENT_NAME: "pull_request_target",
+      },
+    )).resolves.toBeUndefined();
   });
 
   it("blocks merge when the default branch head advances after verification", async () => {
@@ -263,10 +315,11 @@ function read(relative: string): string {
 }
 
 async function verifierModule(): Promise<{
-  assertInstallationIdentity(
+  assertTrustedActionsContext(
     github: { request(method: string, apiPath: string): Promise<unknown> },
-    expectedAppId: string,
-    expectedSlug: string,
+    policy: unknown,
+    binding: unknown,
+    environment: Record<string, string>,
   ): Promise<void>;
   assertMergePreconditions(
     github: { request(method: string, apiPath: string): Promise<unknown> },
@@ -280,11 +333,16 @@ async function verifierModule(): Promise<{
 function verifierPolicy() {
   return {
     repository: { owner: "beforeload", name: "one-cli", defaultBranch: "main" },
+    workflow: { event: "pull_request_target" },
     requiredChecks: [
       { name: "verify", appId: 15368 },
       { name: "one-cli/independent-verifier", appId: 15368 },
     ],
-    reviewIdentity: { actor: "github-actions[bot]" },
+    reviewIdentity: {
+      appId: 15368,
+      actor: "github-actions[bot]",
+      actorId: 41898282,
+    },
   };
 }
 

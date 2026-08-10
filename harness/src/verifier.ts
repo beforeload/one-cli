@@ -24,6 +24,7 @@ export interface IndependentVerifierPolicy {
     readonly event: "pull_request_target";
     readonly blobSha: string;
     readonly policyVersion: "one-cli.independent-verifier/v4";
+    readonly policyHash: string;
   };
   readonly requiredChecks: readonly {
     readonly name: string;
@@ -35,8 +36,8 @@ export interface IndependentVerifierPolicy {
   };
   readonly reviewIdentity: {
     readonly appId: 15368;
-    readonly appSlug: "github-actions";
     readonly actor: "github-actions[bot]";
+    readonly actorId: 41898282;
   };
   readonly protectedPaths: {
     readonly exact: readonly string[];
@@ -102,7 +103,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   ], "verifier repository");
   const workflow = exactRecord(
     root.workflow,
-    ["path", "event", "blobSha", "policyVersion"],
+    ["path", "event", "blobSha", "policyVersion", "policyHash"],
     "verifier workflow",
   );
   if (
@@ -110,7 +111,9 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     workflow.event !== "pull_request_target" ||
     typeof workflow.blobSha !== "string" ||
     !SHA.test(workflow.blobSha) ||
-    workflow.policyVersion !== "one-cli.independent-verifier/v4"
+    workflow.policyVersion !== "one-cli.independent-verifier/v4" ||
+    typeof workflow.policyHash !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(workflow.policyHash)
   ) {
     throw new Error("Verifier workflow path, event, blob, or policy version is invalid");
   }
@@ -148,15 +151,14 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   }
   const reviewIdentity = exactRecord(
     root.reviewIdentity,
-    ["appId", "appSlug", "actor"],
+    ["appId", "actor", "actorId"],
     "review identity",
   );
-  const appSlug = safeName(reviewIdentity.appSlug, "review App slug");
   const actor = safeName(reviewIdentity.actor, "review actor");
   if (
     reviewIdentity.appId !== 15368 ||
-    appSlug !== "github-actions" ||
-    actor !== "github-actions[bot]"
+    actor !== "github-actions[bot]" ||
+    reviewIdentity.actorId !== 41898282
   ) {
     throw new Error("Review identity must be the built-in GitHub Actions App");
   }
@@ -202,7 +204,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   if (merge.method !== "merge" && merge.method !== "squash" && merge.method !== "rebase") {
     throw new Error("Verifier merge method is invalid");
   }
-  return {
+  const policy: IndependentVerifierPolicy = {
     schema: "one-cli.independent-verifier/v4",
     repository: {
       owner: repositorySlug(repository.owner, "repository owner"),
@@ -214,6 +216,7 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
       event: "pull_request_target",
       blobSha: workflow.blobSha,
       policyVersion: "one-cli.independent-verifier/v4",
+      policyHash: workflow.policyHash,
     },
     requiredChecks,
     emittedCheck: {
@@ -222,8 +225,8 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     },
     reviewIdentity: {
       appId: 15368,
-      appSlug: "github-actions",
       actor: "github-actions[bot]",
+      actorId: 41898282,
     },
     protectedPaths: { exact, prefixes },
     semanticReview: {
@@ -251,6 +254,30 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     },
     merge: { enabled: merge.enabled, method: merge.method },
   };
+  if (verifierPolicyHash(policy) !== policy.workflow.policyHash) {
+    throw new Error("Verifier policy hash does not match its canonical trusted fields");
+  }
+  return policy;
+}
+
+export function verifierPolicyHash(policy: IndependentVerifierPolicy): string {
+  const canonical = {
+    schema: policy.schema,
+    repository: policy.repository,
+    workflow: {
+      path: policy.workflow.path,
+      event: policy.workflow.event,
+      policyVersion: policy.workflow.policyVersion,
+    },
+    requiredChecks: policy.requiredChecks,
+    emittedCheck: policy.emittedCheck,
+    reviewIdentity: policy.reviewIdentity,
+    protectedPaths: policy.protectedPaths,
+    semanticReview: policy.semanticReview,
+    limits: policy.limits,
+    merge: policy.merge,
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 export function validatePinnedPull(
@@ -293,6 +320,7 @@ export function inspectTrustedVerifier(
       "scripts/independent-verifier.mjs",
       "one-cli/independent-verifier",
       `ONE_CLI_VERIFIER_POLICY_VERSION: ${policy.workflow.policyVersion}`,
+      `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
     ]) {
       if (!workflow.includes(expected)) throw new Error(`workflow lacks ${expected}`);
     }
