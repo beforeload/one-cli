@@ -23,6 +23,7 @@ const requiredFiles = [
   ".github/ISSUE_TEMPLATE/feature.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
   "harness/verifier-policy.yml",
+  "scripts/bootstrap-verifier-runner.sh",
 ];
 
 const failures = [];
@@ -31,6 +32,7 @@ const trustedVerifierExactPaths = [
   ".npmrc",
   "package.json",
   "package-lock.json",
+  "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
@@ -350,6 +352,16 @@ if (
   !/^[0-9a-f]{64}$/u.test(verifierPolicy?.workflow?.policyHash ?? "")
 ) {
   failures.push("harness/verifier-policy.yml must pin both checks and review to GitHub Actions");
+}
+if (
+  verifierPolicy?.workflow?.runnerLabels?.join("\n") !==
+    ["self-hosted", "macOS", "one-cli-verifier"].join("\n") ||
+  verifierPolicy?.semanticReview?.defaultBaseUrl !== "http://127.0.0.1:8085/v1" ||
+  verifierPolicy?.semanticReview?.apiKey !== "local-proxy" ||
+  verifierPolicy?.semanticReview?.profiles?.[0]?.defaultModel !== "claude-opus-4.8" ||
+  verifierPolicy?.semanticReview?.profiles?.[1]?.defaultModel !== "gpt-5.4"
+) {
+  failures.push("harness/verifier-policy.yml must pin the self-hosted local proxy verifier");
 }
 for (const protectedPath of [
   "AUTONOMY.md",

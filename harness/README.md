@@ -80,6 +80,8 @@ All mutable state is under `$ONE_CLI_HOME/harness` (default
 reservations, the single-instance lock, and launchd output. No host state
 belongs in the repository. `ONE_CLI_HOME`, the environment file, and active
 release paths must be canonical, non-symlink paths under that private root.
+The journal rolls into bounded, hash-chained segments without losing sequence
+or tamper evidence during long unattended runs.
 Active releases are resolved only from
 `$ONE_CLI_HOME/autonomy/<repo-key>/releases`.
 
@@ -119,6 +121,8 @@ accepted fallback.
 
 The independent verifier has no local key, custom App, or repository secret.
 GitHub Actions supplies an ephemeral `GITHUB_TOKEN` as the built-in App identity.
+That token is used only for GitHub API, review, and merge operations; model
+inference uses the runner-local proxy and never receives it.
 The Actions verifier never calls `/installation`, branch-protection, ruleset, or
 Actions-permission APIs. It requires `GITHUB_ACTIONS=true`, the exact
 `GITHUB_REPOSITORY` and event repository, and validates `/user` as
@@ -136,8 +140,9 @@ every normal and protected PR. GitHub supplies workflow text from the trusted
 default branch. The job checks out the exact event base SHA into `trusted/`,
 installs and builds only that trusted tree, and checks out the
 PR head separately into `untrusted/` with persisted credentials disabled. No
-file or command from `untrusted/` is executed. The required first job is named
-`one-cli/independent-verifier`; it receives only the ephemeral workflow token.
+file or command from `untrusted/` is executed. Both verifier and merge jobs run
+only on exact `[self-hosted, macOS, one-cli-verifier]` labels, with no hosted
+fallback. The required first job is named `one-cli/independent-verifier`.
 
 `harness/verifier-policy.yml` pins the base repository, default branch, trusted
 workflow path, Git blob SHA and policy version, required `verify` check name and
@@ -161,9 +166,14 @@ and head SHA. It also revalidates exact-head check App provenance before review,
 and exact-head check App and approval actor/commit provenance before merge.
 Base advancement fails and relies on the resulting new workflow run.
 
-Two independent profiles with distinct GitHub Models IDs use the same ephemeral workflow token and
-receive bounded, secret-redacted diff evidence as untrusted data. Repository
-variables may select model IDs; safe distinct defaults require no setup.
+Two independent profiles make separate OpenAI-compatible calls to the
+runner-local proxy. Defaults are `claude-opus-4.8`, `gpt-5.4`,
+`http://127.0.0.1:8085/v1`, and the non-secret placeholder key `local-proxy`.
+Repository variables may override both model IDs and the localhost base URL;
+the equivalent host variables are `ONE_CLI_VERIFIER_MODEL_A`,
+`ONE_CLI_VERIFIER_MODEL_B`, and `ONE_CLI_VERIFIER_BASE_URL`. Repository
+variables take precedence over host defaults. Pull-request-controlled values
+are never accepted. Both calls receive bounded, secret-redacted diff evidence.
 Responses are strict JSON. Models are veto-only: deterministic
 gates establish eligibility, while either veto rejects it; model text can never
 authorize a merge. Malformed output or profile collapse fails closed. The App
@@ -175,6 +185,27 @@ token never reads branch-protection or ruleset APIs; the local governance
 readiness port proves the workflow blob/policy hash and the full protection
 contract, including both required checks pinned to App ID `15368`, before
 product execution, while GitHub's merge API enforces the live rules.
+
+The same owner read port inventories repository runners and reports a strict
+`runner-health` check. Product work is blocked unless at least one runner with
+all three pinned labels is online and non-busy.
+
+Install the official runner beneath `ONE_CLI_HOME` with the protected bootstrap
+script. It is dry-run by default. Before applying, copy the SHA-256 from the
+official `actions/runner` release and mint a short-lived repository registration
+token; neither value is written by the script.
+
+```bash
+ONE_CLI_HOME="$HOME/.one-cli" \
+  ONE_CLI_RUNNER_SHA256="<official-release-sha256>" \
+  ONE_CLI_RUNNER_REGISTRATION_TOKEN="<short-lived-repository-token>" \
+  scripts/bootstrap-verifier-runner.sh --apply
+```
+
+The script downloads only the pinned official release asset over HTTPS,
+verifies its checksum, registers only `beforeload/one-cli` with custom label
+`one-cli-verifier`, then installs and starts the official launchd service. The
+registration token is unset before service installation and is never persisted.
 
 ## Delivery behavior
 

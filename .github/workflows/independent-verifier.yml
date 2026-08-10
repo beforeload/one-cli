@@ -9,7 +9,7 @@ permissions:
 
 env:
   ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4
-  ONE_CLI_VERIFIER_POLICY_SHA256: f184299b1bb65516ef6fb3e2afd76ec2474f224990f07472e1ef1b98eb0dce9f
+  ONE_CLI_VERIFIER_POLICY_SHA256: 6953e9b1f3d3e98458b69cd20a156f896cf261b377686dad205774c2670696e7
 
 concurrency:
   group: independent-verifier-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
@@ -18,13 +18,12 @@ concurrency:
 jobs:
   verifier:
     name: one-cli/independent-verifier
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, one-cli-verifier]
     timeout-minutes: 30
     permissions:
       contents: read
       checks: read
       pull-requests: write
-      models: read
     steps:
       - name: Check out exact trusted base
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -67,8 +66,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TRUSTED_ROOT: ${{ github.workspace }}/trusted
           UNTRUSTED_ROOT: ${{ github.workspace }}/untrusted
-          ONE_CLI_VERIFIER_MODEL_A: ${{ vars.ONE_CLI_VERIFIER_MODEL_A || 'openai/gpt-4.1' }}
-          ONE_CLI_VERIFIER_MODEL_B: ${{ vars.ONE_CLI_VERIFIER_MODEL_B || 'openai/gpt-4.1-mini' }}
+          ONE_CLI_VERIFIER_REPOSITORY_MODEL_A: ${{ vars.ONE_CLI_VERIFIER_MODEL_A }}
+          ONE_CLI_VERIFIER_REPOSITORY_MODEL_B: ${{ vars.ONE_CLI_VERIFIER_MODEL_B }}
+          ONE_CLI_VERIFIER_REPOSITORY_BASE_URL: ${{ vars.ONE_CLI_VERIFIER_BASE_URL }}
+          ONE_CLI_VERIFIER_API_KEY: local-proxy
         run: >-
           node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"
           --event "$GITHUB_EVENT_PATH"
@@ -80,7 +81,7 @@ jobs:
     name: merge-exact-verified-head
     needs: verifier
     if: needs.verifier.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, one-cli-verifier]
     timeout-minutes: 10
     permissions:
       contents: write

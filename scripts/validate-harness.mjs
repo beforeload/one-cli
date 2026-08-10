@@ -31,6 +31,7 @@ const required = [
   "harness/src/verifier.ts",
   "package.json",
   "package-lock.json",
+  "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
@@ -43,6 +44,7 @@ const trustedVerifierExactPaths = [
   ".npmrc",
   "package.json",
   "package-lock.json",
+  "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
@@ -165,7 +167,16 @@ if (
   policy.requiredChecks[1]?.name !== "one-cli/independent-verifier" ||
   policy.requiredChecks[1]?.appId !== 15368 ||
   policy?.semanticReview?.quorum !== 2 ||
-  policy?.semanticReview?.profiles?.length !== 2
+  policy?.semanticReview?.profiles?.length !== 2 ||
+  policy?.workflow?.runnerLabels?.join("\n") !==
+    ["self-hosted", "macOS", "one-cli-verifier"].join("\n") ||
+  policy?.semanticReview?.baseUrlEnvironment !== "ONE_CLI_VERIFIER_BASE_URL" ||
+  policy?.semanticReview?.repositoryBaseUrlEnvironment !==
+    "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL" ||
+  policy?.semanticReview?.defaultBaseUrl !== "http://127.0.0.1:8085/v1" ||
+  policy?.semanticReview?.apiKey !== "local-proxy" ||
+  policy?.semanticReview?.profiles?.[0]?.defaultModel !== "claude-opus-4.8" ||
+  policy?.semanticReview?.profiles?.[1]?.defaultModel !== "gpt-5.4"
 ) {
   failures.push("trusted verifier policy identity, binding, or quorum is invalid");
 }
@@ -199,7 +210,11 @@ for (const expected of [
   "ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4",
   `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
   "name: one-cli/independent-verifier",
-  "models: read",
+  "runs-on: [self-hosted, macOS, one-cli-verifier]",
+  "ONE_CLI_VERIFIER_REPOSITORY_MODEL_A",
+  "ONE_CLI_VERIFIER_REPOSITORY_MODEL_B",
+  "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL",
+  "ONE_CLI_VERIFIER_API_KEY: local-proxy",
   "GITHUB_TOKEN: ${{ github.token }}",
   "needs: verifier",
   "if: needs.verifier.result == 'success'",
@@ -227,7 +242,6 @@ exactPermissions(workflowDocument?.jobs?.verifier?.permissions, {
   contents: "read",
   checks: "read",
   "pull-requests": "write",
-  models: "read",
 }, "verifier job");
 exactPermissions(workflowDocument?.jobs?.merge?.permissions, {
   contents: "write",
@@ -297,6 +311,14 @@ if (
 if (/create-github-app-token|ONE_CLI_VERIFIER_APP_PRIVATE_KEY|secrets\./u.test(workflow)) {
   failures.push("independent verifier workflow references a custom App or repository secret");
 }
+if (/ubuntu-latest|macos-latest/u.test(workflow)) {
+  failures.push("independent verifier workflow references retired models or hosted runners");
+}
+if (
+  workflow.match(/runs-on: \[self-hosted, macOS, one-cli-verifier\]/gu)?.length !== 2
+) {
+  failures.push("verifier and merge jobs must use only the exact dedicated runner labels");
+}
 
 const governance = read(".github/workflows/governance.yml");
 if (
@@ -340,8 +362,28 @@ for (const expected of [
   "default branch",
   "can_approve_pull_request_reviews=true",
   "require_last_push_approval",
+  "`runner-health`",
+  "`claude-opus-4.8`",
+  "`gpt-5.4`",
+  "`http://127.0.0.1:8085/v1`",
 ]) {
   if (!readme.includes(expected)) failures.push(`harness verifier documentation lacks ${expected}`);
+}
+
+const runnerBootstrap = read("scripts/bootstrap-verifier-runner.sh");
+for (const expected of [
+  "Dry run; no files, registration, or services were changed.",
+  "ONE_CLI_RUNNER_REGISTRATION_TOKEN",
+  "shasum -a 256 --check",
+  'REPOSITORY_URL="https://github.com/beforeload/one-cli"',
+  'RUNNER_LABEL="one-cli-verifier"',
+  "./svc.sh install",
+  "./svc.sh start",
+]) {
+  if (!runnerBootstrap.includes(expected)) failures.push(`runner bootstrap lacks ${expected}`);
+}
+if (/(?:printf|echo|cat).*\$ONE_CLI_RUNNER_REGISTRATION_TOKEN/u.test(runnerBootstrap)) {
+  failures.push("runner bootstrap may persist or print the registration token");
 }
 
 if (failures.length > 0) {

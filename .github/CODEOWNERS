@@ -6,6 +6,7 @@
 /.npmrc @beforeload
 /package.json @beforeload
 /package-lock.json @beforeload
+/scripts/bootstrap-verifier-runner.sh @beforeload
 /scripts/independent-verifier.mjs @beforeload
 /scripts/validate-autonomy.mjs @beforeload
 /scripts/validate-harness.mjs @beforeload

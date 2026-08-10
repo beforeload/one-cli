@@ -36,7 +36,8 @@ jobs:
           while IFS= read -r -d '' path; do
             case "$path" in
               AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS | harness/* | \
-              .npmrc | package.json | package-lock.json | scripts/independent-verifier.mjs | \
+              .npmrc | package.json | package-lock.json | scripts/bootstrap-verifier-runner.sh | \
+              scripts/independent-verifier.mjs | \
               scripts/validate-autonomy.mjs | scripts/validate-harness.mjs | tsconfig.json | \
               tsconfig.build.json | src/autonomy/roadmap-enforcement.ts)
                 protected=true
