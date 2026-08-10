@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GitManager } from "../../src/autonomy/git.js";
@@ -398,6 +399,9 @@ describe("portable autonomy adapters", () => {
     expect(request?.timeoutMs).toBe(1_234);
     expect(request?.maxOutputBytes).toBe(4_321);
     expect(request?.env?.HOME).not.toBe(process.env.HOME);
+    expect(request?.env?.HOME).toMatch(
+      new RegExp(`^${escapeRegex(fs.realpathSync(os.tmpdir()))}${path.sep}`),
+    );
   });
 
   it("allows Node to traverse only runtime path ancestors on Darwin", async () => {
@@ -409,7 +413,12 @@ describe("portable autonomy adapters", () => {
       commands: {
         node: {
           executable: fs.realpathSync(process.execPath),
-          args: ["--version"],
+          args: [
+            "-e",
+            "const fs=require('node:fs'),p=require('node:path');" +
+              "fs.mkdirSync(p.join(process.env.HOME,'.npm','_logs'),{recursive:true});" +
+              "process.stdout.write(process.version)",
+          ],
         },
       },
     });
@@ -450,3 +459,7 @@ describe("portable autonomy adapters", () => {
     expect(profile.split("\n").some((line) => line.startsWith("(allow network"))).toBe(false);
   });
 });
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
