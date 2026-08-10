@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const workflow = read(".github/workflows/independent-verifier.yml");
@@ -127,7 +127,7 @@ describe("independent verifier trusted workflow", () => {
   it("performs final live binding reads after waits and immediately before writes", () => {
     const finalReview = script.slice(
       script.indexOf("async function submitFinalReview"),
-      script.indexOf("async function submitBoundReview"),
+      script.indexOf("export async function submitBoundReview"),
     );
     expect(finalReview.indexOf("waitForPinnedChecks")).toBeLessThan(
       finalReview.indexOf("revalidatePull"),
@@ -148,8 +148,9 @@ describe("independent verifier trusted workflow", () => {
   });
 
   it("gives every head a distinct SHA-bound review operation", () => {
+    expect(script).toContain('const REVIEW_MARKER_PREFIX = "one-cli-independent-verifier:v4:"');
     expect(script).toContain(
-      "`one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`",
+      "`${REVIEW_MARKER_PREFIX}${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`",
     );
     expect(script).toContain('"REQUEST_CHANGES"');
     expect(script).toContain('"APPROVE"');
@@ -228,6 +229,146 @@ describe("independent verifier trusted workflow", () => {
     )).resolves.toBeUndefined();
   });
 
+  it("publishes a later approval over a prior exact failure without dismissal", async () => {
+    const verifier = await verifierModule();
+    const policy = verifierPolicy();
+    const binding = pullBinding("a".repeat(40), "b".repeat(40));
+    const marker = reviewMarker(binding);
+    const approvedBody = `${marker}\n\n{"result":"eligible"}`;
+    const calls: Array<{ method: string; body?: unknown }> = [];
+    const github = {
+      request: async (method: string, _apiPath: string, body?: unknown) => {
+        calls.push({ method, body });
+        if (method === "GET") {
+          return [exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z")];
+        }
+        return {
+          ...exactReview(binding, "APPROVED", "2026-08-10T10:01:00Z"),
+          body: approvedBody,
+        };
+      },
+    };
+    const beforeReview = vi.fn(async () => undefined);
+
+    await expect(verifier.submitBoundReview(
+      github,
+      policy,
+      binding,
+      marker,
+      "APPROVE",
+      approvedBody,
+      beforeReview,
+    )).resolves.toBeUndefined();
+
+    expect(beforeReview).toHaveBeenCalledOnce();
+    expect(calls).toEqual([
+      { method: "GET", body: undefined },
+      {
+        method: "POST",
+        body: { commit_id: binding.headSha, event: "APPROVE", body: approvedBody },
+      },
+    ]);
+  });
+
+  it("reconciles repeated exact failures and same-state duplicates without writing", async () => {
+    const verifier = await verifierModule();
+    const policy = verifierPolicy();
+    const binding = pullBinding("a".repeat(40), "b".repeat(40));
+    const marker = reviewMarker(binding);
+    const github = {
+      request: async (method: string) => {
+        expect(method).toBe("GET");
+        return [
+          exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
+          {
+            ...exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
+            body: `${marker}\n\n{"result":"different failure detail"}`,
+          },
+        ];
+      },
+    };
+    const beforeReview = vi.fn(async () => undefined);
+
+    await expect(verifier.submitBoundReview(
+      github,
+      policy,
+      binding,
+      marker,
+      "REQUEST_CHANGES",
+      `${marker}\n\n{"result":"latest failure detail"}`,
+      beforeReview,
+    )).resolves.toBeUndefined();
+    expect(beforeReview).toHaveBeenCalledOnce();
+  });
+
+  it("uses only the unambiguous latest exact review state for merge approval", async () => {
+    const verifier = await verifierModule();
+    const policy = verifierPolicy();
+    const binding = pullBinding("a".repeat(40), "b".repeat(40));
+    const reviews = [
+      exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
+      exactReview(binding, "APPROVED", "2026-08-10T10:01:00Z"),
+    ];
+    await expect(verifier.assertBoundApproval(
+      { request: async () => reviews },
+      policy,
+      binding,
+    )).resolves.toBeUndefined();
+
+    await expect(verifier.assertBoundApproval(
+      { request: async () => [...reviews].reverse() },
+      policy,
+      binding,
+    )).resolves.toBeUndefined();
+
+    await expect(verifier.assertBoundApproval(
+      {
+        request: async () => [
+          reviews[1],
+          exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:02:00Z"),
+        ],
+      },
+      policy,
+      binding,
+    )).rejects.toThrow("lacks one pinned");
+  });
+
+  it("fails closed on ambiguous or foreign exact-operation review evidence", async () => {
+    const verifier = await verifierModule();
+    const policy = verifierPolicy();
+    const binding = pullBinding("a".repeat(40), "b".repeat(40));
+    const latest = "2026-08-10T10:00:00Z";
+    await expect(verifier.assertBoundApproval(
+      {
+        request: async () => [
+          exactReview(binding, "APPROVED", latest),
+          exactReview(binding, "CHANGES_REQUESTED", latest),
+        ],
+      },
+      policy,
+      binding,
+    )).rejects.toThrow("ambiguous");
+
+    const foreignReviews = [
+      {
+        ...exactReview(binding, "APPROVED", latest),
+        user: { login: "someone-else", id: 1, type: "User" },
+      },
+      { ...exactReview(binding, "APPROVED", latest), commit_id: "c".repeat(40) },
+      {
+        ...exactReview(binding, "APPROVED", latest),
+        body: `one-cli-independent-verifier:v4:7:${binding.baseSha}:${"c".repeat(40)}`,
+      },
+    ];
+    for (const review of foreignReviews) {
+      await expect(verifier.assertBoundApproval(
+        { request: async () => [review] },
+        policy,
+        binding,
+      )).rejects.toThrow("conflicts with the exact operation");
+    }
+  });
+
   it("blocks merge when the default branch head advances after verification", async () => {
     const verifier = await verifierModule();
     const baseSha = "a".repeat(40);
@@ -265,7 +406,8 @@ describe("independent verifier trusted workflow", () => {
               state: "APPROVED",
               commit_id: headSha,
               body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
-              user: { login: "github-actions[bot]", type: "Bot" },
+              submitted_at: "2026-08-10T10:00:00Z",
+              user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
             },
           ];
         }
@@ -340,7 +482,8 @@ describe("independent verifier trusted workflow", () => {
               state: "APPROVED",
               commit_id: headSha,
               body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
-              user: { login: "github-actions[bot]", type: "Bot" },
+              submitted_at: "2026-08-10T10:00:00Z",
+              user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
             },
           ];
         }
@@ -371,6 +514,20 @@ async function verifierModule(): Promise<{
     policy: unknown,
     binding: unknown,
     environment: Record<string, string>,
+  ): Promise<void>;
+  assertBoundApproval(
+    github: { request(method: string, apiPath: string): Promise<unknown> },
+    policy: unknown,
+    binding: unknown,
+  ): Promise<void>;
+  submitBoundReview(
+    github: { request(method: string, apiPath: string, body?: unknown): Promise<unknown> },
+    policy: unknown,
+    binding: unknown,
+    marker: string,
+    event: "APPROVE" | "REQUEST_CHANGES",
+    body: string,
+    beforeReview: () => Promise<void>,
   ): Promise<void>;
   assertMergePreconditions(
     github: { request(method: string, apiPath: string): Promise<unknown> },
@@ -405,5 +562,23 @@ function pullBinding(baseSha: string, headSha: string) {
     baseSha,
     headSha,
     pullNumber: 7,
+  };
+}
+
+function reviewMarker(binding: ReturnType<typeof pullBinding>): string {
+  return `one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
+}
+
+function exactReview(
+  binding: ReturnType<typeof pullBinding>,
+  state: "APPROVED" | "CHANGES_REQUESTED",
+  submittedAt: string,
+) {
+  return {
+    state,
+    commit_id: binding.headSha,
+    body: reviewMarker(binding),
+    submitted_at: submittedAt,
+    user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
   };
 }

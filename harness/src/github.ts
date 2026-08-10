@@ -341,10 +341,8 @@ function ghEnvironment(source: Readonly<Record<string, string>>): Record<string,
     "XDG_CONFIG_HOME",
     "GH_CONFIG_DIR",
     "GH_HOST",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
   ]) {
-    const value = source[name] ?? process.env[name];
+    const value = source[name];
     if (value !== undefined) env[name] = value;
   }
   return env;

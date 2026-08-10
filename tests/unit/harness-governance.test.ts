@@ -18,6 +18,17 @@ const WORKFLOW = fs.readFileSync(
   path.join(ROOT, ".github/workflows/independent-verifier.yml"),
   "utf8",
 );
+const RELEASE = {
+  bootstrap: false,
+  sha: "a".repeat(40),
+  entrypoint: "/immutable/release/dist/index.js",
+  entrypointSha256: "b".repeat(64),
+  manifestSha256: "c".repeat(64),
+  moduleHashes: {
+    "dist/index.js": "b".repeat(64),
+    "dist/autonomy/worker.js": "d".repeat(64),
+  },
+} as const;
 
 describe("live governance readiness gate", () => {
   it("blocks roadmap product #7 under the old protection with zero product calls", async () => {
@@ -53,18 +64,37 @@ describe("live governance readiness gate", () => {
     const root = makeTempDir("governance-ready");
     try {
       const readiness = port(readyProtection());
-      await expect(readiness.inspect()).resolves.toMatchObject({ ready: true });
+      const inspected = await readiness.inspect();
+      expect(inspected).toMatchObject({ ready: true });
+      expect(inspected.checks).toEqual(expect.arrayContaining([
+        {
+          name: "builder-keyring-auth",
+          ok: true,
+          detail: "canonical gh executable and config authenticated without exported tokens",
+        },
+        {
+          name: "builder-login",
+          ok: true,
+          detail: "authenticated host builder login is exactly beforeload",
+        },
+        {
+          name: "worker-tool-policy",
+          ok: true,
+          detail: "shell/network tools disabled; exact write paths and protected control closure enforced",
+        },
+      ]));
       const product = { tick: vi.fn(async () => ({
         action: "issue-7",
         state: "idle",
         phase: "roadmap" as const,
         detail: "executed",
       })) };
+      const journal = new HostJournal(path.join(root, "journal.jsonl"));
       const lanes = automaticLanes(
         readiness,
         product,
         { tick: async () => ({ action: "verifier", state: "idle", detail: "ok" }) },
-        new HostJournal(path.join(root, "journal.jsonl")),
+        journal,
       );
 
       await expect(lanes.tick()).resolves.toMatchObject({
@@ -72,6 +102,9 @@ describe("live governance readiness gate", () => {
         state: "idle",
       });
       expect(product.tick).toHaveBeenCalledOnce();
+      expect(
+        journal.read().find((event) => event.type === "harness.governance-readiness")?.data,
+      ).toMatchObject({ ready: true, release: RELEASE });
     } finally {
       removeTempDir(root);
     }
@@ -119,6 +152,81 @@ describe("live governance readiness gate", () => {
     });
   });
 
+  it("rejects the wrong authenticated host login", async () => {
+    const result = await port(readyProtection(), true, [healthyRunner()], {
+      login: "somebody-else",
+    }).inspect();
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "builder-login",
+      ok: false,
+      detail: "Authenticated gh login must exactly match repository owner beforeload",
+    });
+  });
+
+  it("rejects token-bearing host environments even when gh auth succeeds", async () => {
+    const result = await port(
+      readyProtection(),
+      true,
+      [healthyRunner()],
+      { login: "beforeload" },
+      ["GH_TOKEN"],
+    ).inspect();
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "builder-no-token-environment",
+      ok: false,
+      detail: "Token-bearing environment variables are forbidden: GH_TOKEN",
+    });
+  });
+
+  it("uses only the code-fixed read-only governance API inventory", async () => {
+    const requests: ProcessRequest[] = [];
+    await port(
+      readyProtection(),
+      true,
+      [healthyRunner()],
+      { login: "beforeload" },
+      [],
+      requests,
+    ).inspect();
+    expect(requests.map((request) => request.args)).toEqual([
+      ["auth", "status", "--hostname", "github.com"],
+      ["api", "--method", "GET", "user"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/issues?state=all&per_page=1"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/pulls?state=all&per_page=1"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/actions/workflows/independent-verifier.yml"],
+      [
+        "api",
+        "--method",
+        "GET",
+        "repos/beforeload/one-cli/contents/.github/workflows/independent-verifier.yml?ref=main",
+      ],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/actions/permissions/workflow"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/branches/main/protection"],
+      ["api", "--method", "GET", "repos/beforeload/one-cli/actions/runners?per_page=100"],
+    ]);
+    expect(requests.every((request) =>
+      request.env?.GH_TOKEN === undefined && request.env?.GITHUB_TOKEN === undefined
+    )).toBe(true);
+  });
+
+  it("resolves and inspects the executable release before live governance", async () => {
+    const order: string[] = [];
+    await port(
+      readyProtection(),
+      true,
+      [healthyRunner()],
+      { login: "beforeload" },
+      [],
+      undefined,
+      order,
+    ).inspect();
+    expect(order[0]).toBe("release");
+    expect(order).toContain("governance");
+  });
+
   it("reports every invariant instead of collapsing readiness into one healthy flag", async () => {
     const result = await port(oldProtection()).inspect();
     expect(result.ready).toBe(false);
@@ -139,7 +247,13 @@ describe("live governance readiness gate", () => {
       "stale-review-dismissal",
       "required-approvals",
       "last-push-approval",
-      "runtime-no-protection-write",
+      "builder-no-token-environment",
+      "builder-keyring-auth",
+      "builder-login",
+      "builder-repository-push",
+      "builder-issues-capability",
+      "builder-pull-request-capability",
+      "worker-tool-policy",
       "runner-health",
     ]));
   });
@@ -149,9 +263,22 @@ function port(
   protection: Record<string, unknown>,
   canApprovePullRequestReviews = true,
   runners: unknown[] = [healthyRunner()],
+  user: Record<string, unknown> = { login: "beforeload" },
+  tokenEnvironmentNames: readonly string[] = [],
+  requests?: ProcessRequest[],
+  order?: string[],
 ): GhGovernanceReadinessPort {
   const responses: Record<string, unknown> = {
-    "repos/beforeload/one-cli": { default_branch: "main" },
+    user,
+    "repos/beforeload/one-cli": {
+      default_branch: "main",
+      full_name: "beforeload/one-cli",
+      owner: { login: "beforeload" },
+      permissions: { push: true },
+      has_issues: true,
+    },
+    "repos/beforeload/one-cli/issues?state=all&per_page=1": [],
+    "repos/beforeload/one-cli/pulls?state=all&per_page=1": [],
     "repos/beforeload/one-cli/actions/workflows/independent-verifier.yml": {
       state: "active",
       path: ".github/workflows/independent-verifier.yml",
@@ -168,15 +295,6 @@ function port(
       can_approve_pull_request_reviews: canApprovePullRequestReviews,
     },
     "repos/beforeload/one-cli/branches/main/protection": protection,
-    installation: {
-      app_id: 99,
-      permissions: {
-        administration: "read",
-        contents: "write",
-        issues: "write",
-        pull_requests: "write",
-      },
-    },
     "repos/beforeload/one-cli/actions/runners?per_page=100": {
       total_count: runners.length,
       runners,
@@ -184,6 +302,9 @@ function port(
   };
   const runner: ProcessRunner = {
     run: async (request: ProcessRequest) => {
+      order?.push("governance");
+      requests?.push(request);
+      if (request.args[0] === "auth") return result({});
       const apiPath = request.args.at(-1)!;
       if (!(apiPath in responses)) return failedResult(`unknown ${apiPath}`);
       return result(responses[apiPath]);
@@ -199,6 +320,17 @@ function port(
       defaultBranch: "main",
     },
     policy: POLICY,
+    tokenEnvironmentNames,
+    workerPolicy: {
+      inspect: async () => {
+        order?.push("release");
+        return {
+          ready: true,
+          detail: "shell/network tools disabled; exact write paths and protected control closure enforced",
+          release: RELEASE,
+        };
+      },
+    },
   });
 }
 

@@ -28,7 +28,7 @@ import {
 } from "./launchd.js";
 import { OneCliClient } from "./one-cli.js";
 import { assertRoadmapParent, loadRoadmap, type Roadmap } from "./roadmap.js";
-import { SpawnProcessRunner, requireSuccess } from "./runner.js";
+import { SpawnProcessRunner } from "./runner.js";
 import { seedRoadmap } from "./seed.js";
 import { SeedOperationJournal } from "./seed-state.js";
 import { resolveHarnessRelease } from "./release.js";
@@ -38,6 +38,15 @@ import {
   loadVerifierPolicy,
   type TrustedVerifierReadiness,
 } from "./verifier.js";
+import {
+  canonicalGhEnvironment,
+  safeEnvironment,
+  tokenBearingEnvironmentNames,
+} from "./environment.js";
+import {
+  WorkerReleaseReadiness,
+  type WorkerPolicyReadinessPort,
+} from "./worker-policy.js";
 
 const COMMANDS = new Set([
   "doctor",
@@ -70,6 +79,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const paths = resolveHarnessPaths();
     const hostEnv = loadHostEnvironment(paths.envFile);
     const environment = safeEnvironment(paths.oneCliHome, hostEnv);
+    const tokenEnvironmentNames = tokenBearingEnvironmentNames(hostEnv, process.env);
     const repository = loadRepository(options.workspace);
     const runner = new SpawnProcessRunner(Object.values(hostEnv));
     const verifierPolicy = loadVerifierPolicy(defaultVerifierPolicy());
@@ -86,69 +96,68 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     );
     const workerEnvironment: Record<string, string> = {
       ...environment,
+      ...canonicalGhEnvironment(environment),
       ONE_CLI_GH_EXECUTABLE: ghExecutable,
     };
-    const governance = new GhGovernanceReadinessPort({
-      runner,
-      ghExecutable,
-      environment: workerEnvironment,
-      repository,
-      policy: verifierPolicy,
-    });
-    if (options.command === "verifier-status") {
-      const readiness = await governance.inspect();
-      const ready = verifier.ready && readiness.ready;
-      output({ ...verifier, ready, governance: readiness });
-      return ready ? 0 : 1;
-    }
-    if (options.command === "run" && options.dryRun) {
-      const readiness = await governance.inspect();
-      const ready = verifier.ready && readiness.ready;
-      output({
-        schema: "one-cli.harness/tick-v1",
-        action: "governance-readiness",
-        state: ready ? "idle" : "blocked",
-        phase: "normal",
-        detail: ready
-          ? "Dry-run inspected live governance; no subprocess, journal, or external write ran"
-          : governanceFailureDetail(readiness, verifier),
-        dryRun: true,
-        governance: readiness,
+    const releaseResolver = () =>
+      resolveHarnessRelease(paths.oneCliHome, options.workspace, repository.repoKey);
+    const createGovernance = (workerPolicy: WorkerPolicyReadinessPort) =>
+      new GhGovernanceReadinessPort({
+        runner,
+        ghExecutable,
+        environment: workerEnvironment,
+        repository,
+        policy: verifierPolicy,
+        tokenEnvironmentNames,
+        workerPolicy,
       });
+    if (
+      options.command === "verifier-status" ||
+      (options.command === "run" && options.dryRun)
+    ) {
+      const releaseReadiness = new WorkerReleaseReadiness({
+        workspace: options.workspace,
+        policy: verifierPolicy,
+        runner,
+        releaseResolver,
+      });
+      const readiness = await createGovernance(releaseReadiness).inspect();
+      const ready = verifier.ready && readiness.ready;
+      if (options.command === "verifier-status") {
+        output({ ...verifier, ready, governance: readiness });
+      } else {
+        output({
+          schema: "one-cli.harness/tick-v1",
+          action: "governance-readiness",
+          state: ready ? "idle" : "blocked",
+          phase: "normal",
+          detail: ready
+            ? "Dry-run inspected live governance; no product subprocess, journal, or external write ran"
+            : governanceFailureDetail(readiness, verifier),
+          dryRun: true,
+          governance: readiness,
+        });
+      }
       return ready ? 0 : 1;
     }
     const recoveryKey = loadOrCreateRecoveryKey(paths.recoveryKey);
     const journal = new HostJournal(paths.journal, Object.values(hostEnv));
     const roadmap = loadRoadmap(options.roadmapPath);
     const github = new GhClient(runner, repository, ghExecutable, workerEnvironment);
-    let builderIdentityDetail = "not probed";
-    let builderIdentityHealthy = false;
-    if (
-      options.command === "doctor" ||
-      options.command === "run" ||
-      (options.command === "seed" && options.apply)
-    ) {
-      try {
-        builderIdentityDetail = await probeLeastPrivilegeBuilder({
-          runner,
-          ghExecutable,
-          environment: workerEnvironment,
-          ...(workerEnvironment.ONE_CLI_BUILDER_APP_ID === undefined
-            ? {}
-            : { expectedAppId: workerEnvironment.ONE_CLI_BUILDER_APP_ID }),
-        });
-        builderIdentityHealthy = true;
-      } catch (error) {
-        builderIdentityDetail = message(error);
-        if (options.command === "run" || (options.command === "seed" && options.apply)) {
-          throw new Error(`Least-privilege builder identity is not ready: ${builderIdentityDetail}`);
-        }
-      }
-    }
+    const releaseReadiness = new WorkerReleaseReadiness({
+      workspace: options.workspace,
+      policy: verifierPolicy,
+      runner,
+      releaseResolver,
+      handoffSha: () => readRoadmapHandoff(journal)?.activeReleaseSha,
+      assertDescendsFrom: async (ancestorSha, descendantSha, signal) =>
+        await github.assertCommitDescendsFrom(ancestorSha, descendantSha, signal),
+    });
+    const governance = createGovernance(releaseReadiness);
     const oneCli = new OneCliClient(
       runner,
       options.workspace,
-      () => resolveHarnessRelease(paths.oneCliHome, options.workspace, repository.repoKey),
+      () => releaseReadiness.executableRelease(),
       workerEnvironment,
     );
     const seedOperations = new SeedOperationJournal(paths.seedOperations);
@@ -178,11 +187,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             name: "independent-verifier",
             ok: verifier.ready,
             detail: verifier.detail,
-          },
-          {
-            name: "builder-identity",
-            ok: builderIdentityHealthy,
-            detail: builderIdentityDetail,
           },
           ...readiness.checks.map((check) => ({
             name: `governance:${check.name}`,
@@ -419,7 +423,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             ready: ready.map((issue) => issue.number),
           },
           launchd: service,
-          release,
+          release: {
+            entrypoint: release.entrypoint,
+            sha: release.sha,
+            bootstrap: release.bootstrap,
+            manifestSha256: release.manifestSha256,
+          },
           verifier,
           governance: readiness,
           journal: journal.read(20),
@@ -485,6 +494,7 @@ export function automaticLanes(
       journal.append("harness.governance-readiness", {
         ready: readiness.ready,
         failed: readiness.checks.filter((check) => !check.ok).map((check) => check.name),
+        release: readiness.release,
       });
       if (!readiness.ready) {
         return {
@@ -782,29 +792,6 @@ export function repositoryKey(owner: string, repository: string): string {
   return `${slug.slice(0, 80)}-${digest}`;
 }
 
-function safeEnvironment(
-  oneCliHome: string,
-  sourced: Readonly<Record<string, string>>,
-): Record<string, string> {
-  const environment: Record<string, string> = {
-    ...sourced,
-    ONE_CLI_HOME: oneCliHome,
-    NO_COLOR: "1",
-  };
-  for (const name of [
-    "HOME",
-    "PATH",
-    "XDG_CONFIG_HOME",
-    "GH_CONFIG_DIR",
-    "GH_HOST",
-    "ONE_CLI_GH_EXECUTABLE",
-  ]) {
-    const value = process.env[name];
-    if (value !== undefined && environment[name] === undefined) environment[name] = value;
-  }
-  return environment;
-}
-
 function defaultRoadmap(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../roadmap.yml");
 }
@@ -820,75 +807,6 @@ function regularFile(filePath: string): boolean {
   } catch {
     return false;
   }
-}
-
-async function probeLeastPrivilegeBuilder(input: {
-  runner: SpawnProcessRunner;
-  ghExecutable: string;
-  environment: Readonly<Record<string, string>>;
-  expectedAppId?: string;
-}): Promise<string> {
-  if (
-    input.expectedAppId === undefined ||
-    !/^[1-9][0-9]*$/u.test(input.expectedAppId)
-  ) {
-    throw new Error("ONE_CLI_BUILDER_APP_ID must pin the local builder App");
-  }
-  const installation = recordValue(
-    await ghJson(input, "installation"),
-    "builder App installation",
-  );
-  if (String(installation.app_id) !== input.expectedAppId) {
-    throw new Error("Authenticated builder token does not match ONE_CLI_BUILDER_APP_ID");
-  }
-  const permissions = recordValue(installation.permissions, "builder App permissions");
-  for (const name of ["contents", "issues", "pull_requests"]) {
-    if (permissions[name] !== "write") {
-      throw new Error(`Builder App lacks required ${name}:write`);
-    }
-  }
-  const forbidden = [
-    "administration",
-    "checks",
-    "actions",
-    "actions_variables",
-    "actions_secrets",
-    "workflows",
-  ].filter((name) => permissions[name] === "write");
-  if (forbidden.length > 0) {
-    throw new Error(`Builder App has forbidden write permissions: ${forbidden.join(", ")}`);
-  }
-  const slug = typeof installation.app_slug === "string" ? installation.app_slug : "unknown";
-  return `github-app:${slug} (${input.expectedAppId}); no admin/check/verifier authority`;
-}
-
-async function ghJson(
-  input: {
-    runner: SpawnProcessRunner;
-    ghExecutable: string;
-    environment: Readonly<Record<string, string>>;
-  },
-  apiPath: string,
-): Promise<unknown> {
-  const result = requireSuccess("gh api verifier readiness", await input.runner.run({
-    executable: input.ghExecutable,
-    args: ["api", "--method", "GET", apiPath],
-    env: input.environment,
-    timeoutMs: 30_000,
-    maxOutputBytes: 2 * 1024 * 1024,
-  }));
-  try {
-    return JSON.parse(result.stdout) as unknown;
-  } catch {
-    throw new Error("GitHub verifier readiness response is malformed JSON");
-  }
-}
-
-function recordValue(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
 }
 
 function governanceFailureDetail(

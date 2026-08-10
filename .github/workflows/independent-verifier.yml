@@ -9,7 +9,7 @@ permissions:
 
 env:
   ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4
-  ONE_CLI_VERIFIER_POLICY_SHA256: 10079b850658ffd6df1f3e92b431071311fd602426ba39a2d4c738bea7d0165f
+  ONE_CLI_VERIFIER_POLICY_SHA256: da5426906bc70fffe89f4dfde69f2aa195e5c762a0e614b7fea61d4ff65b57b0
 
 concurrency:
   group: independent-verifier-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}

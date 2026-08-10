@@ -38,6 +38,17 @@ const trustedVerifierExactPaths = [
   "scripts/validate-harness.mjs",
   "tsconfig.json",
   "tsconfig.build.json",
+  "src/agent.ts",
+  "src/approval.ts",
+  "src/autonomy/cli.ts",
+  "src/autonomy/intake.ts",
+  "src/autonomy/maintenance.ts",
+  "src/autonomy/orchestrator.ts",
+  "src/autonomy/roadmap-enforcement.ts",
+  "src/autonomy/worker.ts",
+  "src/policy.ts",
+  "src/tools.ts",
+  "src/workspace.ts",
 ];
 
 for (const relativePath of requiredFiles) {

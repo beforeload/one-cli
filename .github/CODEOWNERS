@@ -12,4 +12,14 @@
 /scripts/validate-harness.mjs @beforeload
 /tsconfig.json @beforeload
 /tsconfig.build.json @beforeload
+/src/agent.ts @beforeload
+/src/approval.ts @beforeload
+/src/autonomy/cli.ts @beforeload
+/src/autonomy/intake.ts @beforeload
+/src/autonomy/maintenance.ts @beforeload
+/src/autonomy/orchestrator.ts @beforeload
 /src/autonomy/roadmap-enforcement.ts @beforeload
+/src/autonomy/worker.ts @beforeload
+/src/policy.ts @beforeload
+/src/tools.ts @beforeload
+/src/workspace.ts @beforeload

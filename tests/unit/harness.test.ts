@@ -595,14 +595,23 @@ describe("cold-start harness", () => {
     fs.mkdirSync(path.join(release, "dist"), { recursive: true });
     const bytes = Buffer.from("immutable release");
     fs.writeFileSync(path.join(release, "dist", "index.js"), bytes);
-    fs.writeFileSync(path.join(release, "manifest.json"), JSON.stringify({
+    const manifestBody = {
+      version: 1,
       commitSha: sha,
+      totalBytes: bytes.length,
       files: [{
         path: "dist/index.js",
+        bytes: bytes.length,
         sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        executable: false,
       }],
+    };
+    fs.writeFileSync(path.join(release, "manifest.json"), JSON.stringify({
+      ...manifestBody,
+      manifestSha256: crypto.createHash("sha256").update(stableJson(manifestBody)).digest("hex"),
     }));
     fs.writeFileSync(path.join(root, "autonomy", repoKey, "releases", "state.json"), JSON.stringify({
+      version: 1,
       active: sha,
       generation: 1,
     }));
@@ -613,6 +622,17 @@ describe("cold-start harness", () => {
     });
   });
 });
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
 
 class FakeGitHub implements GitHubPort {
   readonly issues: HostIssue[] = [];

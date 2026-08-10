@@ -262,7 +262,7 @@ async function doctor(options: CliOptions): Promise<number> {
       checks.push({ name: "darwin-sandbox", ok: false, detail: errorMessage(error) });
     }
     try {
-      const safety = await new GitHubClient(new GhRestTransport()).getRepositorySafety(
+      const safety = await new GitHubClient(hostGhRestTransport()).getRepositorySafety(
         { owner: config.product.repository.owner, repo: config.product.repository.name },
         config.product.repository.defaultBranch,
       );
@@ -689,7 +689,7 @@ async function scheduleCommand(
     throw new Error("schedule requires status");
   }
   const now = Date.now();
-  const github = new GitHubClient(new GhRestTransport());
+  const github = new GitHubClient(hostGhRestTransport());
   const promotable = await github.listCandidateIssues(
     { owner: config.product.repository.owner, repo: config.product.repository.name },
     ["source:user", "maintainer-accepted"],
@@ -744,7 +744,7 @@ async function intakeCommand(
 ): Promise<number> {
   const [operation, first, second, extra] = options.positionals;
   if (extra !== undefined) throw new Error("Too many intake arguments");
-  const github = new GitHubClient(new GhRestTransport());
+  const github = new GitHubClient(hostGhRestTransport());
   const intake = new TrustedIntake({ config, store, github });
   if (operation === "promote-user") {
     if (!first || !second) {
@@ -1008,10 +1008,12 @@ export function createGitHubRuntimeAdapters(
   research?: GitHubResearchPort;
 } {
   const runner = options.runner ?? new SpawnProcessRunner();
-  const rest = options.rest ?? new GhRestTransport({ runner });
+  const ghExecutable = process.env.ONE_CLI_GH_EXECUTABLE;
+  const executableOptions = ghExecutable === undefined ? {} : { ghExecutable };
+  const rest = options.rest ?? new GhRestTransport({ runner, ...executableOptions });
   const github = new GitHubClient(rest);
   if (config.mode === "observe") return { github };
-  const graphql = options.graphql ?? new GhGraphqlTransport({ runner });
+  const graphql = options.graphql ?? new GhGraphqlTransport({ runner, ...executableOptions });
   const read = new GitHubReadClient(rest, graphql);
   const research = new GitHubResearchPort({ store, github: read, config });
   return { github, read, research };
@@ -1213,6 +1215,11 @@ function safeHostEnvironment(): Readonly<Record<string, string>> {
     if (value !== undefined) environment[name] = value;
   }
   return environment;
+}
+
+function hostGhRestTransport(): GhRestTransport {
+  const ghExecutable = process.env.ONE_CLI_GH_EXECUTABLE;
+  return new GhRestTransport(ghExecutable === undefined ? {} : { ghExecutable });
 }
 
 function remoteUrl(config: AutonomyConfig): string {

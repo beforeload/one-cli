@@ -39,6 +39,29 @@ export function semanticVetoPrompt(input: SemanticReviewEnvelope): string {
   ].join("\n");
 }
 
+export function parseSemanticVetoContent(profile: string, content: string): SemanticVeto {
+  safeLine(profile, "semantic profile");
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("Semantic veto content must be a non-empty string");
+  }
+  const trimmed = content.trim();
+  let json = trimmed;
+  if (trimmed.startsWith("```")) {
+    const fenced = /^```json\n([\s\S]+)\n```$/u.exec(trimmed);
+    if (!fenced || fenced[1]!.includes("```")) {
+      throw new Error("Semantic veto content must be raw JSON or one exact json fenced block");
+    }
+    json = fenced[1]!;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new Error("Semantic veto content contains malformed JSON");
+  }
+  return parseSemanticVeto(profile, value);
+}
+
 export function parseSemanticVeto(profile: string, value: unknown): SemanticVeto {
   safeLine(profile, "semantic profile");
   const object = exactRecord(value, ["veto", "findings", "summary"], "semantic veto");

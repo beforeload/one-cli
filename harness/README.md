@@ -105,19 +105,17 @@ cat >"$HOME/.one-cli/harness.env" <<'EOF'
 OPENAI_API_KEY=replace-on-host
 OPENAI_MODEL=replace-on-host
 ONE_CLI_GH_EXECUTABLE=/opt/homebrew/bin/gh
-GH_TOKEN=replace-with-least-privilege-builder-installation-token
-ONE_CLI_BUILDER_APP_ID=replace-with-builder-app-id
 EOF
 ```
 
-The local GitHub credential must be an installation token for the pinned
-`ONE_CLI_BUILDER_APP_ID`. Before any applied `run` or `seed`, the harness calls
-the read-only `/installation` endpoint and requires `contents`, `issues`, and
-`pull_requests` write plus `administration:read`, while rejecting
-administration, checks, Actions, workflow, variable, and secret write authority.
-The administration read grant is used only to inspect Actions workflow settings
-and branch protection before product execution. An owner OAuth login is not an
-accepted fallback.
+The host runtime is trusted and uses the existing macOS keyring credential from
+the canonical `gh` executable and canonical `gh` config directory. `GH_TOKEN`
+and `GITHUB_TOKEN` must be absent. Before product execution, readiness requires
+`gh auth status`, binds `gh api user` to the tracked repository owner/login
+`beforeload`, and uses only fixed read-only repository, issue, and pull-request
+endpoints to prove repository push authority and endpoint availability. It also
+reads the exact workflow, Actions setting, runner inventory, and branch
+protection needed to prove the independent verifier remains effective.
 
 The independent verifier has no local key, custom App, or repository secret.
 GitHub Actions supplies an ephemeral `GITHUB_TOKEN` as the built-in App identity.
@@ -127,11 +125,16 @@ The Actions verifier never calls `/installation`, branch-protection, ruleset, or
 Actions-permission APIs. It requires `GITHUB_ACTIONS=true`, the exact
 `GITHUB_REPOSITORY` and event repository, and validates `/user` as
 `github-actions[bot]` user ID `41898282` when that endpoint is available.
-The local builder GitHub identity must remain least privilege and must not have
-checks, review, administration-write, ruleset-write, or branch-protection-write
-authority.
-Branch-protection bootstrap remains an operator action;
-no runtime or verifier code has an endpoint that changes protection.
+The model Worker receives the product model settings but never `GH_TOKEN`,
+`GITHUB_TOKEN`, verifier model settings, App values, or private-key values.
+It has no shell or network tool, writes only exact approved paths, and cannot
+read the host keyring outside its worktree. The host coordinator intentionally
+retains owner authority for repository, issue, pull-request, and git operations;
+that host trust is not a least-privilege identity claim. The no-self-approval
+boundary instead comes from the Worker isolation plus the independent
+GitHub-Actions verifier and enforced last-push approval. Branch administration,
+protection mutation, and ruleset APIs are not allowed runtime operations in any
+host, Worker, or verifier lane.
 
 ## Trusted independent verifier
 
@@ -243,7 +246,14 @@ A child advances only after the issue is closed, its PR is merged, and local
 attempt evidence proves post-merge dogfood and release. After the first active
 host-private release exists, every invocation resolves and verifies that exact
 immutable release instead of workspace `dist`. Bootstrap `dist` is allowed
-only before release management starts. At roadmap handoff, the active release
+only before release management starts, from a clean current `HEAD`, and only
+when a temporary reproducible TypeScript build matches the compiled entrypoint
+and protected Worker control modules. Immutable readiness verifies the
+content-addressed release manifest and statically inspects those compiled
+modules without importing or evaluating them. Readiness status and the host
+journal record the inspected commit, entrypoint, manifest digest, and module
+digests; a release switch or digest mismatch before invocation fails closed.
+At roadmap handoff, the active release
 SHA must equal the final child merge SHA. The harness then records one durable
 `roadmap.handoff.completed` event bound to the parent, final child, pull, merge,
 and release. Later normal ticks accept newer releases only when GitHub proves
