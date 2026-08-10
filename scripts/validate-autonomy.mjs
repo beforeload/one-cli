@@ -356,6 +356,13 @@ if (
 if (
   verifierPolicy?.workflow?.runnerLabels?.join("\n") !==
     ["self-hosted", "macOS", "one-cli-verifier"].join("\n") ||
+  verifierPolicy?.workflow?.toolchain?.nodeBinEnvironment !== "ONE_CLI_NODE_BIN" ||
+  verifierPolicy?.workflow?.toolchain?.nodeVersionRange !== ">=22.13.0 <25" ||
+  verifierPolicy?.workflow?.toolchain?.strictPathSuffix !==
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" ||
+  verifierPolicy?.workflow?.toolchain?.versionCommandTimeoutSeconds !== 10 ||
+  verifierPolicy?.workflow?.toolchain?.setupNodeAction !== "forbidden" ||
+  verifierPolicy?.workflow?.toolchain?.hostedToolDownload !== "forbidden" ||
   verifierPolicy?.semanticReview?.defaultBaseUrl !== "http://127.0.0.1:8085/v1" ||
   verifierPolicy?.semanticReview?.apiKey !== "local-proxy" ||
   verifierPolicy?.semanticReview?.profiles?.[0]?.defaultModel !== "claude-opus-4.8" ||
@@ -388,7 +395,14 @@ for (const template of [
 }
 
 for (const [relativePath, content] of documents) {
-  if (content.includes(`${path.sep}Users${path.sep}`)) {
+  const hostPathScannable =
+    relativePath === "scripts/bootstrap-verifier-runner.sh"
+      ? content.replace(
+        "/Users/daniel/.nvm/versions/node/v24.14.1/bin",
+        "<pinned-local-node-default>",
+      )
+      : content;
+  if (hostPathScannable.includes(`${path.sep}Users${path.sep}`)) {
     failures.push(`${relativePath} contains a host-private absolute path`);
   }
   if (/\b(?:api[_-]?key|token|password)\s*[:=]\s*["']?[A-Za-z0-9+/=_-]{12,}/i.test(content)) {

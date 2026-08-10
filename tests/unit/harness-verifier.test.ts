@@ -46,6 +46,14 @@ describe("trusted independent verifier policy", () => {
       },
       workflow: {
         runnerLabels: ["self-hosted", "macOS", "one-cli-verifier"],
+        toolchain: {
+          nodeBinEnvironment: "ONE_CLI_NODE_BIN",
+          nodeVersionRange: ">=22.13.0 <25",
+          strictPathSuffix: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+          versionCommandTimeoutSeconds: 10,
+          setupNodeAction: "forbidden",
+          hostedToolDownload: "forbidden",
+        },
       },
       semanticReview: {
         quorum: 2,

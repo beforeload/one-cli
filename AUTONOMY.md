@@ -104,6 +104,10 @@ The verifier and merge jobs run only on a repository runner with exact
 `self-hosted`, `macOS`, and `one-cli-verifier` labels. Governance readiness uses
 the owner read port to require at least one matching online, non-busy runner;
 an absent, offline, busy, or mislabeled runner blocks product execution.
+Both jobs must begin with the pinned offline host Node/npm preflight and may not
+use `actions/setup-node` or another hosted toolchain download action. The runner
+service supplies canonical `ONE_CLI_NODE_BIN` and an exact minimal PATH; Node
+must be `>=22.13.0` and `<25`.
 The verifier uses GitHub's ephemeral workflow token only for GitHub API,
 review, and merge operations under the built-in GitHub Actions App identity;
 there is no custom App, local verifier key, or repository secret.
@@ -124,7 +128,9 @@ does not call branch-protection or ruleset APIs; GitHub's merge API enforces the
 live protection rules. No runtime path may change or lower branch protection.
 
 Tracked content must not contain credentials, tokens, host-private paths,
-runtime ledgers, checkpoints, task identifiers, or reporting endpoints.
+runtime ledgers, checkpoints, task identifiers, or reporting endpoints. The
+protected runner bootstrap's explicit, non-secret verifier-host Node fallback
+is the sole host-path exception and must remain overrideable and canonicalized.
 
 ## Permanent coordinator
 

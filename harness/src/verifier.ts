@@ -27,6 +27,14 @@ export interface IndependentVerifierPolicy {
     readonly blobSha: string;
     readonly policyVersion: "one-cli.independent-verifier/v4";
     readonly policyHash: string;
+    readonly toolchain: {
+      readonly nodeBinEnvironment: "ONE_CLI_NODE_BIN";
+      readonly nodeVersionRange: ">=22.13.0 <25";
+      readonly strictPathSuffix: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+      readonly versionCommandTimeoutSeconds: 10;
+      readonly setupNodeAction: "forbidden";
+      readonly hostedToolDownload: "forbidden";
+    };
   };
   readonly requiredChecks: readonly {
     readonly name: string;
@@ -107,9 +115,17 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
   ], "verifier repository");
   const workflow = exactRecord(
     root.workflow,
-    ["path", "event", "runnerLabels", "blobSha", "policyVersion", "policyHash"],
+    ["path", "event", "runnerLabels", "blobSha", "policyVersion", "policyHash", "toolchain"],
     "verifier workflow",
   );
+  const toolchain = exactRecord(workflow.toolchain, [
+    "nodeBinEnvironment",
+    "nodeVersionRange",
+    "strictPathSuffix",
+    "versionCommandTimeoutSeconds",
+    "setupNodeAction",
+    "hostedToolDownload",
+  ], "verifier workflow toolchain");
   if (
     workflow.path !== ".github/workflows/independent-verifier.yml" ||
     workflow.event !== "pull_request_target" ||
@@ -122,6 +138,17 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
     !/^[0-9a-f]{64}$/u.test(workflow.policyHash)
   ) {
     throw new Error("Verifier workflow path, event, blob, or policy version is invalid");
+  }
+  if (
+    toolchain.nodeBinEnvironment !== "ONE_CLI_NODE_BIN" ||
+    toolchain.nodeVersionRange !== ">=22.13.0 <25" ||
+    toolchain.strictPathSuffix !==
+      "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" ||
+    toolchain.versionCommandTimeoutSeconds !== 10 ||
+    toolchain.setupNodeAction !== "forbidden" ||
+    toolchain.hostedToolDownload !== "forbidden"
+  ) {
+    throw new Error("Verifier workflow must use the pinned preinstalled host Node.js toolchain");
   }
   if (!Array.isArray(root.requiredChecks) || root.requiredChecks.length === 0) {
     throw new Error("Verifier required checks must be a non-empty array");
@@ -243,6 +270,14 @@ export function loadVerifierPolicy(filePath: string): IndependentVerifierPolicy 
       blobSha: workflow.blobSha,
       policyVersion: "one-cli.independent-verifier/v4",
       policyHash: workflow.policyHash,
+      toolchain: {
+        nodeBinEnvironment: "ONE_CLI_NODE_BIN",
+        nodeVersionRange: ">=22.13.0 <25",
+        strictPathSuffix: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        versionCommandTimeoutSeconds: 10,
+        setupNodeAction: "forbidden",
+        hostedToolDownload: "forbidden",
+      },
     },
     requiredChecks,
     emittedCheck: {
@@ -297,6 +332,7 @@ export function verifierPolicyHash(policy: IndependentVerifierPolicy): string {
       event: policy.workflow.event,
       runnerLabels: policy.workflow.runnerLabels,
       policyVersion: policy.workflow.policyVersion,
+      toolchain: policy.workflow.toolchain,
     },
     requiredChecks: policy.requiredChecks,
     emittedCheck: policy.emittedCheck,
@@ -351,12 +387,21 @@ export function inspectTrustedVerifier(
       "runs-on: [self-hosted, macOS, one-cli-verifier]",
       "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL",
       "ONE_CLI_VERIFIER_API_KEY: local-proxy",
+      'expected_path="${ONE_CLI_NODE_BIN:?runner service must define ONE_CLI_NODE_BIN}:$strict_path_suffix"',
+      "Verifier Node.js must be >=22.13.0 and <25",
+      "node_version=\"$(bounded_version node \"$ONE_CLI_NODE_BIN/node\")\"",
+      "npm_version=\"$(bounded_version npm \"$ONE_CLI_NODE_BIN/npm\")\"",
       `ONE_CLI_VERIFIER_POLICY_VERSION: ${policy.workflow.policyVersion}`,
       `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
     ]) {
       if (!workflow.includes(expected)) throw new Error(`workflow lacks ${expected}`);
     }
-    for (const rejected of ["ubuntu-latest", "macos-latest"]) {
+    for (const rejected of [
+      "ubuntu-latest",
+      "macos-latest",
+      "actions/setup-node",
+      "actions/download-artifact",
+    ]) {
       if (workflow.includes(rejected)) throw new Error(`workflow contains retired verifier setting ${rejected}`);
     }
     const blobSha = crypto

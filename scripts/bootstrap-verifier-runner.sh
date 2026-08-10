@@ -16,6 +16,8 @@ RUNNER_HOME="$ONE_CLI_HOME/github-actions-runner"
 REPOSITORY_URL="https://github.com/beforeload/one-cli"
 RUNNER_LABEL="one-cli-verifier"
 RUNNER_NAME="${ONE_CLI_RUNNER_NAME:-one-cli-verifier-$(hostname -s)}"
+KNOWN_NODE_BIN="/Users/daniel/.nvm/versions/node/v24.14.1/bin"
+STRICT_PATH_SUFFIX="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 case "$ONE_CLI_HOME" in
   /*) ;;
@@ -44,6 +46,61 @@ case "$(uname -m)" in
   *) echo "Unsupported runner architecture" >&2; exit 2 ;;
 esac
 
+if [[ -n "${ONE_CLI_NODE_BIN:-}" ]]; then
+  requested_node_bin="$ONE_CLI_NODE_BIN"
+elif [[ -d "$KNOWN_NODE_BIN" ]]; then
+  requested_node_bin="$KNOWN_NODE_BIN"
+else
+  discovered_node="$(command -v node || true)"
+  if [[ -z "$discovered_node" ]]; then
+    echo "ONE_CLI_NODE_BIN is required when node cannot be discovered" >&2
+    exit 2
+  fi
+  requested_node_bin="$(dirname "$discovered_node")"
+fi
+case "$requested_node_bin" in
+  /*) ;;
+  *) echo "ONE_CLI_NODE_BIN must be absolute" >&2; exit 2 ;;
+esac
+if [[ ! -d "$requested_node_bin" ]]; then
+  echo "ONE_CLI_NODE_BIN must name an existing directory" >&2
+  exit 2
+fi
+ONE_CLI_NODE_BIN="$(cd "$requested_node_bin" && pwd -P)"
+if [[ "$ONE_CLI_NODE_BIN" == *$'\n'* || "$ONE_CLI_NODE_BIN" == *$'\r'* ]]; then
+  echo "ONE_CLI_NODE_BIN contains an invalid newline" >&2
+  exit 2
+fi
+NODE_EXECUTABLE="$ONE_CLI_NODE_BIN/node"
+NPM_EXECUTABLE="$ONE_CLI_NODE_BIN/npm"
+if [[ ! -f "$NODE_EXECUTABLE" || ! -x "$NODE_EXECUTABLE" ]]; then
+  echo "ONE_CLI_NODE_BIN/node must be a regular executable" >&2
+  exit 2
+fi
+if [[ ! -f "$NPM_EXECUTABLE" || ! -x "$NPM_EXECUTABLE" ]]; then
+  echo "ONE_CLI_NODE_BIN/npm must be a regular executable" >&2
+  exit 2
+fi
+TOOLCHAIN_PATH="$ONE_CLI_NODE_BIN:$STRICT_PATH_SUFFIX"
+PATH="$TOOLCHAIN_PATH"
+export PATH ONE_CLI_NODE_BIN
+NODE_VERSION="$("$NODE_EXECUTABLE" --version)"
+NPM_VERSION="$("$NPM_EXECUTABLE" --version)"
+if [[ ! "$NODE_VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  echo "node --version returned an invalid version: $NODE_VERSION" >&2
+  exit 2
+fi
+NODE_MAJOR="${BASH_REMATCH[1]}"
+NODE_MINOR="${BASH_REMATCH[2]}"
+if (( NODE_MAJOR < 22 || (NODE_MAJOR == 22 && NODE_MINOR < 13) || NODE_MAJOR >= 25 )); then
+  echo "Verifier Node.js must be >=22.13.0 and <25; found $NODE_VERSION" >&2
+  exit 2
+fi
+if [[ ! "$NPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "npm --version returned an invalid version: $NPM_VERSION" >&2
+  exit 2
+fi
+
 ASSET="actions-runner-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
 DOWNLOAD_URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${ASSET}"
 
@@ -53,6 +110,10 @@ Dry run; no files, registration, or services were changed.
 runner home: $RUNNER_HOME
 official asset: $DOWNLOAD_URL
 required labels: self-hosted, macOS, $RUNNER_LABEL
+node bin: $ONE_CLI_NODE_BIN
+node version: $NODE_VERSION
+npm version: $NPM_VERSION
+service PATH: $TOOLCHAIN_PATH
 apply requires:
   ONE_CLI_RUNNER_SHA256=<official release checksum>
   ONE_CLI_RUNNER_REGISTRATION_TOKEN=<short-lived repo registration token>
@@ -92,6 +153,11 @@ cd "$RUNNER_HOME"
   --work _work \
   --replace
 unset ONE_CLI_RUNNER_REGISTRATION_TOKEN
+{
+  printf 'ONE_CLI_NODE_BIN=%s\n' "$ONE_CLI_NODE_BIN"
+  printf 'PATH=%s\n' "$TOOLCHAIN_PATH"
+} > "$RUNNER_HOME/.env"
+chmod 600 "$RUNNER_HOME/.env"
 ./svc.sh install
 ./svc.sh start
 

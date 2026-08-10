@@ -170,6 +170,13 @@ if (
   policy?.semanticReview?.profiles?.length !== 2 ||
   policy?.workflow?.runnerLabels?.join("\n") !==
     ["self-hosted", "macOS", "one-cli-verifier"].join("\n") ||
+  policy?.workflow?.toolchain?.nodeBinEnvironment !== "ONE_CLI_NODE_BIN" ||
+  policy?.workflow?.toolchain?.nodeVersionRange !== ">=22.13.0 <25" ||
+  policy?.workflow?.toolchain?.strictPathSuffix !==
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" ||
+  policy?.workflow?.toolchain?.versionCommandTimeoutSeconds !== 10 ||
+  policy?.workflow?.toolchain?.setupNodeAction !== "forbidden" ||
+  policy?.workflow?.toolchain?.hostedToolDownload !== "forbidden" ||
   policy?.semanticReview?.baseUrlEnvironment !== "ONE_CLI_VERIFIER_BASE_URL" ||
   policy?.semanticReview?.repositoryBaseUrlEnvironment !==
     "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL" ||
@@ -211,6 +218,14 @@ for (const expected of [
   `ONE_CLI_VERIFIER_POLICY_SHA256: ${policy.workflow.policyHash}`,
   "name: one-cli/independent-verifier",
   "runs-on: [self-hosted, macOS, one-cli-verifier]",
+  "Validate preinstalled Node.js toolchain",
+  'shell: /bin/bash --noprofile --norc -euo pipefail {0}',
+  'expected_path="${ONE_CLI_NODE_BIN:?runner service must define ONE_CLI_NODE_BIN}:$strict_path_suffix"',
+  '[[ "$PATH" == "$expected_path" ]]',
+  'node_version="$(bounded_version node "$ONE_CLI_NODE_BIN/node")"',
+  'npm_version="$(bounded_version npm "$ONE_CLI_NODE_BIN/npm")"',
+  "Verifier Node.js must be >=22.13.0 and <25",
+  "sleep 10",
   "ONE_CLI_VERIFIER_REPOSITORY_MODEL_A",
   "ONE_CLI_VERIFIER_REPOSITORY_MODEL_B",
   "ONE_CLI_VERIFIER_REPOSITORY_BASE_URL",
@@ -226,6 +241,36 @@ for (const expected of [
   if (!workflow.includes(expected)) failures.push(`independent verifier workflow lacks ${expected}`);
 }
 const workflowDocument = YAML.parse(workflow);
+for (const jobName of ["verifier", "merge"]) {
+  const steps = workflowDocument?.jobs?.[jobName]?.steps;
+  const preflight = steps?.[0];
+  if (
+    !Array.isArray(steps) ||
+    preflight?.name !== "Validate preinstalled Node.js toolchain" ||
+    preflight?.shell !== "/bin/bash --noprofile --norc -euo pipefail {0}" ||
+    typeof preflight?.run !== "string" ||
+    !preflight.run.includes(
+      'strict_path_suffix="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"',
+    ) ||
+    !preflight.run.includes(
+      'expected_path="${ONE_CLI_NODE_BIN:?runner service must define ONE_CLI_NODE_BIN}:$strict_path_suffix"',
+    ) ||
+    !preflight.run.includes('[[ "$PATH" == "$expected_path" ]]') ||
+    !preflight.run.includes('node_version="$(bounded_version node "$ONE_CLI_NODE_BIN/node")"') ||
+    !preflight.run.includes('npm_version="$(bounded_version npm "$ONE_CLI_NODE_BIN/npm")"') ||
+    !preflight.run.includes("sleep 10") ||
+    !preflight.run.includes("node_major < 25") ||
+    /\b(?:curl|wget|brew|nvm|npm\s+(?:install|ci)|corepack)\b/u.test(preflight.run)
+  ) {
+    failures.push(`${jobName} must begin with the exact bounded offline host toolchain preflight`);
+  }
+}
+if (
+  workflowDocument?.jobs?.verifier?.steps?.[0]?.run !==
+  workflowDocument?.jobs?.merge?.steps?.[0]?.run
+) {
+  failures.push("verifier and merge jobs must use an identical toolchain preflight");
+}
 const exactPermissions = (actual, expected, label) => {
   if (
     actual === null ||
@@ -314,6 +359,19 @@ if (/create-github-app-token|ONE_CLI_VERIFIER_APP_PRIVATE_KEY|secrets\./u.test(w
 if (/ubuntu-latest|macos-latest/u.test(workflow)) {
   failures.push("independent verifier workflow references retired models or hosted runners");
 }
+if (/actions\/setup-node|actions\/download-artifact|node-version:|cache-dependency-path:/u.test(workflow)) {
+  failures.push("independent verifier workflow may not download or provision a hosted Node toolchain");
+}
+const workflowActions = [...workflow.matchAll(/^\s*uses:\s*(\S+)/gmu)].map((match) => match[1]);
+if (
+  workflowActions.length !== 3 ||
+  workflowActions.some(
+    (action) =>
+      action !== "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+  )
+) {
+  failures.push("independent verifier workflow may use only the pinned checkout action");
+}
 if (
   workflow.match(/runs-on: \[self-hosted, macOS, one-cli-verifier\]/gu)?.length !== 2
 ) {
@@ -377,6 +435,18 @@ for (const expected of [
   "shasum -a 256 --check",
   'REPOSITORY_URL="https://github.com/beforeload/one-cli"',
   'RUNNER_LABEL="one-cli-verifier"',
+  'KNOWN_NODE_BIN="/Users/daniel/.nvm/versions/node/v24.14.1/bin"',
+  'STRICT_PATH_SUFFIX="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"',
+  'ONE_CLI_NODE_BIN="$(cd "$requested_node_bin" && pwd -P)"',
+  'NODE_VERSION="$("$NODE_EXECUTABLE" --version)"',
+  'NPM_VERSION="$("$NPM_EXECUTABLE" --version)"',
+  "Verifier Node.js must be >=22.13.0 and <25",
+  "node bin: $ONE_CLI_NODE_BIN",
+  "node version: $NODE_VERSION",
+  "npm version: $NPM_VERSION",
+  "service PATH: $TOOLCHAIN_PATH",
+  "} > \"$RUNNER_HOME/.env\"",
+  "chmod 600 \"$RUNNER_HOME/.env\"",
   "./svc.sh install",
   "./svc.sh start",
 ]) {
@@ -384,6 +454,16 @@ for (const expected of [
 }
 if (/(?:printf|echo|cat).*\$ONE_CLI_RUNNER_REGISTRATION_TOKEN/u.test(runnerBootstrap)) {
   failures.push("runner bootstrap may persist or print the registration token");
+}
+const runnerEnvironmentWrite = runnerBootstrap.indexOf('} > "$RUNNER_HOME/.env"');
+if (
+  runnerBootstrap.indexOf('unset ONE_CLI_RUNNER_REGISTRATION_TOKEN') > runnerEnvironmentWrite ||
+  runnerEnvironmentWrite < 0 ||
+  runnerEnvironmentWrite > runnerBootstrap.indexOf("./svc.sh install") ||
+  !runnerBootstrap.includes("printf 'ONE_CLI_NODE_BIN=%s\\n' \"$ONE_CLI_NODE_BIN\"") ||
+  !runnerBootstrap.includes("printf 'PATH=%s\\n' \"$TOOLCHAIN_PATH\"")
+) {
+  failures.push("runner bootstrap must write only the strict toolchain environment before service install");
 }
 
 if (failures.length > 0) {

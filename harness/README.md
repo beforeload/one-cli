@@ -142,15 +142,22 @@ installs and builds only that trusted tree, and checks out the
 PR head separately into `untrusted/` with persisted credentials disabled. No
 file or command from `untrusted/` is executed. Both verifier and merge jobs run
 only on exact `[self-hosted, macOS, one-cli-verifier]` labels, with no hosted
-fallback. The required first job is named `one-cli/independent-verifier`.
+fallback. Neither job uses `actions/setup-node` or another hosted toolchain
+download action. Each job begins with the same offline, 10-second-bounded
+`node --version` and `npm --version` preflight. It requires canonical
+`ONE_CLI_NODE_BIN`, exact service `PATH` equal to that bin followed by
+`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, and Node.js
+`>=22.13.0` and `<25` before checkout or dependency installation. The required
+first job is named `one-cli/independent-verifier`.
 
 `harness/verifier-policy.yml` pins the base repository, default branch, trusted
 workflow path, Git blob SHA and policy version, required `verify` check name and
 GitHub Actions App ID `15368`, emitted check name and App ID, review actor
 `github-actions[bot]` with user ID `41898282`, protected paths, bounds, merge
-method, and exactly two semantic profiles. The policy pins the trusted workflow
-blob, while that workflow pins the canonical policy hash; both are checked
-before any applied verifier operation. The workflow emits
+method, preinstalled host toolchain range, strict PATH suffix, setup/download
+prohibition, and exactly two semantic profiles. The policy pins the trusted
+workflow blob, while that workflow pins the canonical policy hash; both are
+checked before any applied verifier operation. The workflow emits
 `one-cli/independent-verifier` for every PR. Normal paths become
 deterministically eligible only after the exact head's pinned `verify` check
 succeeds.
@@ -193,10 +200,16 @@ all three pinned labels is online and non-busy.
 Install the official runner beneath `ONE_CLI_HOME` with the protected bootstrap
 script. It is dry-run by default. Before applying, copy the SHA-256 from the
 official `actions/runner` release and mint a short-lived repository registration
-token; neither value is written by the script.
+token; neither value is written by the script. The script requires a canonical
+host Node/npm bin directory before any download or runner registration. It
+defaults to the pinned verifier host's Node 24 bin when present, otherwise to
+the bin directory containing `command -v node`; operators may override it with
+absolute `ONE_CLI_NODE_BIN`. Dry-run prints the resolved bin, Node/npm versions,
+and exact service PATH without changing host state.
 
 ```bash
 ONE_CLI_HOME="$HOME/.one-cli" \
+  ONE_CLI_NODE_BIN="<absolute-node-and-npm-bin>" \
   ONE_CLI_RUNNER_SHA256="<official-release-sha256>" \
   ONE_CLI_RUNNER_REGISTRATION_TOKEN="<short-lived-repository-token>" \
   scripts/bootstrap-verifier-runner.sh --apply
@@ -206,6 +219,10 @@ The script downloads only the pinned official release asset over HTTPS,
 verifies its checksum, registers only `beforeload/one-cli` with custom label
 `one-cli-verifier`, then installs and starts the official launchd service. The
 registration token is unset before service installation and is never persisted.
+Before service installation, the script writes the runner's private `.env` with
+only canonical `ONE_CLI_NODE_BIN` and its strict PATH (Node bin, Homebrew, and
+system paths), so Actions never relies on an interactive shell or a network
+toolchain setup action.
 
 ## Delivery behavior
 

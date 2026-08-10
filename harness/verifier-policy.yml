@@ -12,9 +12,16 @@ workflow:
     - self-hosted
     - macOS
     - one-cli-verifier
-  blobSha: e947ad0c33093acc34f3a83aefa6ef26a40225a1
+  blobSha: e69955b65cff660e390b1fc67972d23112b33ea2
   policyVersion: one-cli.independent-verifier/v4
-  policyHash: 6953e9b1f3d3e98458b69cd20a156f896cf261b377686dad205774c2670696e7
+  policyHash: 10079b850658ffd6df1f3e92b431071311fd602426ba39a2d4c738bea7d0165f
+  toolchain:
+    nodeBinEnvironment: ONE_CLI_NODE_BIN
+    nodeVersionRange: ">=22.13.0 <25"
+    strictPathSuffix: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    versionCommandTimeoutSeconds: 10
+    setupNodeAction: forbidden
+    hostedToolDownload: forbidden
 
 requiredChecks:
   - name: verify
