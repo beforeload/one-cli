@@ -21,6 +21,7 @@ describe("harness host and Worker environments", () => {
       const environment = safeEnvironment(root, {
         OPENAI_API_KEY: "product-model-key",
         OPENAI_MODEL: "product-model",
+        ONE_CLI_HOME: "$HOME/wrong-state",
         GH_TOKEN: "github-token",
         GITHUB_TOKEN: "actions-token",
         ONE_CLI_VERIFIER_MODEL_A: "verifier-model",
