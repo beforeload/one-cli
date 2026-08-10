@@ -65,8 +65,8 @@ export async function installLaunchd(input: {
   plist: string;
   paths: HarnessPaths;
 }): Promise<{ dryRun: boolean; path: string; label: string }> {
-  assertDarwin();
   if (!input.apply) return { dryRun: true, path: input.paths.launchAgent, label: LAUNCHD_LABEL };
+  assertDarwin();
   fs.mkdirSync(path.dirname(input.paths.launchAgent), { recursive: true, mode: 0o700 });
   fs.mkdirSync(input.paths.stateRoot, { recursive: true, mode: 0o700 });
   const temporary = `${input.paths.launchAgent}.tmp-${process.pid}`;
@@ -93,8 +93,8 @@ export async function uninstallLaunchd(input: {
   runner: ProcessRunner;
   paths: HarnessPaths;
 }): Promise<{ dryRun: boolean; path: string; label: string }> {
-  assertDarwin();
   if (!input.apply) return { dryRun: true, path: input.paths.launchAgent, label: LAUNCHD_LABEL };
+  assertDarwin();
   const domain = `gui/${userId()}`;
   if (fs.existsSync(input.paths.launchAgent)) {
     await input.runner.run({
