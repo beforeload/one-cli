@@ -25,7 +25,9 @@ export function safeEnvironment(
     NO_COLOR: "1",
   };
   for (const [name, value] of Object.entries(sourced)) {
-    if (!isWorkerSecretEnvironment(name)) environment[name] = value;
+    if (name !== "ONE_CLI_HOME" && !isWorkerSecretEnvironment(name)) {
+      environment[name] = value;
+    }
   }
   for (const name of HOST_PASSTHROUGH) {
     const value = inherited[name];
