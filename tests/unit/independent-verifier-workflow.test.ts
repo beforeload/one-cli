@@ -59,6 +59,44 @@ describe("independent verifier trusted workflow", () => {
     expect(workflow).not.toMatch(/ubuntu-latest|macos-latest/u);
   });
 
+  it("uses the identical bounded offline host toolchain preflight in both jobs", () => {
+    expect(workflow.match(/name: Validate preinstalled Node\.js toolchain/gu)).toHaveLength(2);
+    expect(
+      workflow.match(/shell: \/bin\/bash --noprofile --norc -euo pipefail \{0\}/gu),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /expected_path="\$\{ONE_CLI_NODE_BIN:\?runner service must define ONE_CLI_NODE_BIN\}:\$strict_path_suffix"/gu,
+      ),
+    ).toHaveLength(2);
+    expect(workflow.match(/\[\[ "\$PATH" == "\$expected_path" \]\]/gu)).toHaveLength(2);
+    expect(
+      workflow.match(/node_version="\$\(bounded_version node "\$ONE_CLI_NODE_BIN\/node"\)"/gu),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/npm_version="\$\(bounded_version npm "\$ONE_CLI_NODE_BIN\/npm"\)"/gu),
+    ).toHaveLength(2);
+    expect(workflow.match(/sleep 10/gu)).toHaveLength(2);
+    expect(workflow.match(/Verifier Node\.js must be >=22\.13\.0 and <25/gu)).toHaveLength(2);
+    expect(policy).toContain("nodeBinEnvironment: ONE_CLI_NODE_BIN");
+    expect(policy).toContain('nodeVersionRange: ">=22.13.0 <25"');
+    expect(policy).toContain(
+      "strictPathSuffix: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    );
+  });
+
+  it("never downloads or provisions Node in verifier jobs", () => {
+    expect(workflow).not.toMatch(
+      /actions\/setup-node|actions\/download-artifact|node-version:|cache-dependency-path:/u,
+    );
+    const actions = [...workflow.matchAll(/^\s*uses:\s*(\S+)/gmu)].map((match) => match[1]);
+    expect(actions).toEqual([
+      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+    ]);
+  });
+
   it("uses exact git objects and fails closed instead of accepting REST patches", () => {
     expect(script).toContain('"cat-file", "-e"');
     expect(script).toContain('"--binary"');

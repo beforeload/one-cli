@@ -9,7 +9,7 @@ permissions:
 
 env:
   ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4
-  ONE_CLI_VERIFIER_POLICY_SHA256: 6953e9b1f3d3e98458b69cd20a156f896cf261b377686dad205774c2670696e7
+  ONE_CLI_VERIFIER_POLICY_SHA256: 10079b850658ffd6df1f3e92b431071311fd602426ba39a2d4c738bea7d0165f
 
 concurrency:
   group: independent-verifier-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
@@ -25,6 +25,89 @@ jobs:
       checks: read
       pull-requests: write
     steps:
+      - name: Validate preinstalled Node.js toolchain
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          strict_path_suffix="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          expected_path="${ONE_CLI_NODE_BIN:?runner service must define ONE_CLI_NODE_BIN}:$strict_path_suffix"
+          [[ "$ONE_CLI_NODE_BIN" == /* ]] || {
+            echo "ONE_CLI_NODE_BIN must be absolute" >&2
+            exit 1
+          }
+          canonical_node_bin="$(cd "$ONE_CLI_NODE_BIN" && pwd -P)"
+          [[ "$ONE_CLI_NODE_BIN" == "$canonical_node_bin" ]] || {
+            echo "ONE_CLI_NODE_BIN must be canonical" >&2
+            exit 1
+          }
+          [[ "$PATH" == "$expected_path" ]] || {
+            echo "Runner PATH does not match the pinned verifier toolchain PATH" >&2
+            exit 1
+          }
+          [[ "$(command -v node)" == "$ONE_CLI_NODE_BIN/node" ]] || {
+            echo "node does not resolve from ONE_CLI_NODE_BIN" >&2
+            exit 1
+          }
+          [[ "$(command -v npm)" == "$ONE_CLI_NODE_BIN/npm" ]] || {
+            echo "npm does not resolve from ONE_CLI_NODE_BIN" >&2
+            exit 1
+          }
+
+          toolchain_tmp="$(mktemp -d)"
+          trap 'rm -rf "$toolchain_tmp"' EXIT
+          bounded_version() {
+            local label="$1"
+            local executable="$2"
+            local output="$toolchain_tmp/$label"
+            local command_pid timeout_pid status version
+            "$executable" --version >"$output" 2>&1 &
+            command_pid=$!
+            (
+              sleep 10
+              if kill -0 "$command_pid" 2>/dev/null; then
+                kill -TERM "$command_pid" 2>/dev/null || true
+                sleep 2
+                kill -KILL "$command_pid" 2>/dev/null || true
+              fi
+            ) &
+            timeout_pid=$!
+            set +e
+            wait "$command_pid"
+            status=$?
+            set -e
+            kill "$timeout_pid" 2>/dev/null || true
+            wait "$timeout_pid" 2>/dev/null || true
+            if (( status != 0 )); then
+              echo "$label --version failed or exceeded 10 seconds" >&2
+              /bin/cat "$output" >&2
+              return 1
+            fi
+            version="$(<"$output")"
+            [[ "$version" != *$'\n'* && "$version" != *$'\r'* ]] || {
+              echo "$label --version must return exactly one line" >&2
+              return 1
+            }
+            printf '%s' "$version"
+          }
+
+          node_version="$(bounded_version node "$ONE_CLI_NODE_BIN/node")"
+          npm_version="$(bounded_version npm "$ONE_CLI_NODE_BIN/npm")"
+          [[ "$node_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
+            echo "Invalid node version: $node_version" >&2
+            exit 1
+          }
+          node_major="${BASH_REMATCH[1]}"
+          node_minor="${BASH_REMATCH[2]}"
+          (( node_major > 22 || (node_major == 22 && node_minor >= 13) )) &&
+            (( node_major < 25 )) || {
+            echo "Verifier Node.js must be >=22.13.0 and <25; found $node_version" >&2
+            exit 1
+          }
+          [[ "$npm_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid npm version: $npm_version" >&2
+            exit 1
+          }
+          printf 'Using preinstalled node %s and npm %s\n' "$node_version" "$npm_version"
+
       - name: Check out exact trusted base
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -33,13 +116,6 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Set up trusted Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.13.0
-          cache: npm
-          cache-dependency-path: trusted/package-lock.json
 
       - name: Install exact trusted dependencies
         working-directory: trusted
@@ -88,6 +164,89 @@ jobs:
       checks: read
       pull-requests: read
     steps:
+      - name: Validate preinstalled Node.js toolchain
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          strict_path_suffix="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          expected_path="${ONE_CLI_NODE_BIN:?runner service must define ONE_CLI_NODE_BIN}:$strict_path_suffix"
+          [[ "$ONE_CLI_NODE_BIN" == /* ]] || {
+            echo "ONE_CLI_NODE_BIN must be absolute" >&2
+            exit 1
+          }
+          canonical_node_bin="$(cd "$ONE_CLI_NODE_BIN" && pwd -P)"
+          [[ "$ONE_CLI_NODE_BIN" == "$canonical_node_bin" ]] || {
+            echo "ONE_CLI_NODE_BIN must be canonical" >&2
+            exit 1
+          }
+          [[ "$PATH" == "$expected_path" ]] || {
+            echo "Runner PATH does not match the pinned verifier toolchain PATH" >&2
+            exit 1
+          }
+          [[ "$(command -v node)" == "$ONE_CLI_NODE_BIN/node" ]] || {
+            echo "node does not resolve from ONE_CLI_NODE_BIN" >&2
+            exit 1
+          }
+          [[ "$(command -v npm)" == "$ONE_CLI_NODE_BIN/npm" ]] || {
+            echo "npm does not resolve from ONE_CLI_NODE_BIN" >&2
+            exit 1
+          }
+
+          toolchain_tmp="$(mktemp -d)"
+          trap 'rm -rf "$toolchain_tmp"' EXIT
+          bounded_version() {
+            local label="$1"
+            local executable="$2"
+            local output="$toolchain_tmp/$label"
+            local command_pid timeout_pid status version
+            "$executable" --version >"$output" 2>&1 &
+            command_pid=$!
+            (
+              sleep 10
+              if kill -0 "$command_pid" 2>/dev/null; then
+                kill -TERM "$command_pid" 2>/dev/null || true
+                sleep 2
+                kill -KILL "$command_pid" 2>/dev/null || true
+              fi
+            ) &
+            timeout_pid=$!
+            set +e
+            wait "$command_pid"
+            status=$?
+            set -e
+            kill "$timeout_pid" 2>/dev/null || true
+            wait "$timeout_pid" 2>/dev/null || true
+            if (( status != 0 )); then
+              echo "$label --version failed or exceeded 10 seconds" >&2
+              /bin/cat "$output" >&2
+              return 1
+            fi
+            version="$(<"$output")"
+            [[ "$version" != *$'\n'* && "$version" != *$'\r'* ]] || {
+              echo "$label --version must return exactly one line" >&2
+              return 1
+            }
+            printf '%s' "$version"
+          }
+
+          node_version="$(bounded_version node "$ONE_CLI_NODE_BIN/node")"
+          npm_version="$(bounded_version npm "$ONE_CLI_NODE_BIN/npm")"
+          [[ "$node_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
+            echo "Invalid node version: $node_version" >&2
+            exit 1
+          }
+          node_major="${BASH_REMATCH[1]}"
+          node_minor="${BASH_REMATCH[2]}"
+          (( node_major > 22 || (node_major == 22 && node_minor >= 13) )) &&
+            (( node_major < 25 )) || {
+            echo "Verifier Node.js must be >=22.13.0 and <25; found $node_version" >&2
+            exit 1
+          }
+          [[ "$npm_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid npm version: $npm_version" >&2
+            exit 1
+          }
+          printf 'Using preinstalled node %s and npm %s\n' "$node_version" "$npm_version"
+
       - name: Check out exact trusted base
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -96,13 +255,6 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Set up trusted Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.13.0
-          cache: npm
-          cache-dependency-path: trusted/package-lock.json
 
       - name: Install exact trusted dependencies
         working-directory: trusted
