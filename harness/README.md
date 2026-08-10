@@ -197,8 +197,9 @@ approval.
 Issue creation is reserved and fsynced before GitHub is called. An interrupted
 reservation is `in_doubt`; restart reconciles exactly one matching marker.
 Zero or multiple matches require manual resolution and are never recreated.
-Stale harness locks also require explicit operator resolution; automatic
-reclaim is intentionally disabled to prevent split ownership.
+Stale harness locks are reclaimed through an atomic recovery mutex with
+owner-token and inode revalidation, preventing both permanent crash stalls and
+split ownership.
 
 ## launchd
 
