@@ -48,6 +48,8 @@ const ENVIRONMENT =
   /\b(?:command not found|enoent|not installed|missing executable|cannot find module|module not found|unsupported platform|toolchain|sandbox unavailable|no such file or directory|exit handler never called|error with npm itself|error writing to the directory)\b/iu;
 const SANDBOX_DECOMPOSE =
   /\b(?:kill eperm|operation not permitted|\/private\/var\/select|failed to terminate forks worker|sandbox-exec|one_cli_sandboxed|target pgrp)\b/iu;
+const CODE_GATE_EVIDENCE =
+  /\b(?:error TS\d+|FAIL(?:ED)?\b|AssertionError|✖|×|tests? failed|tsc\b|TypeError:)\b/iu;
 
 export function diagnoseFailure(
   receipt: FailureReceiptView,
@@ -61,8 +63,9 @@ export function diagnoseFailure(
     receipt.spawnError ?? "",
   ].join("\n");
   let result: Omit<DeterministicDiagnosis, "schema" | "modelAdvice">;
-  // Sandbox/process-signal signatures win over policy text that may appear in unit stdout.
-  if (SANDBOX_DECOMPOSE.test(text)) {
+  // Sandbox/process-signal signatures win over policy text that may appear in unit stdout,
+  // but not over concrete compiler/test failure evidence in the same receipt.
+  if (SANDBOX_DECOMPOSE.test(text) && !CODE_GATE_EVIDENCE.test(text)) {
     result = {
       category: "environment/toolchain",
       decision: "decompose-issue",
