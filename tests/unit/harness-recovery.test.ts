@@ -41,6 +41,14 @@ describe("harness machine recovery", () => {
       decision: "retry-same-state",
       target: "verifying",
     });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "[vitest-pool]: Failed to terminate forks worker. Error: kill EPERM",
+    }))).toMatchObject({
+      category: "environment/toolchain",
+      decision: "decompose-issue",
+    });
     expect(diagnoseFailure(receipt({ operation: "gate:test", gate: "test" })).decision)
       .toBe("retry-implement");
     expect(diagnoseFailure(receipt({ stderr: "protected path requires approval" }), {
@@ -212,6 +220,68 @@ describe("harness machine recovery", () => {
     expect(fixture.retries).toHaveLength(0);
   });
 
+  it("decomposes sandbox kill EPERM into a new agent-ready issue and pauses the roadmap child", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted\nkill EPERM",
+      fingerprint: "d".repeat(64),
+      hash: "e".repeat(64),
+    });
+    const issue: HostIssue = {
+      number: 7,
+      title: roadmap.children[0]!.title,
+      body: roadmap.children[0]!.seedMarker,
+      labels: ["enhancement", "cold-start-roadmap", "agent-ready", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/7",
+    };
+    await expect(fixture.recovery.recoverWaitingAttempt(
+      status({
+        state: "waiting",
+        detail: {
+          lastFailure: {
+            operation: "gate:unit",
+            fingerprint: failure.fingerprint,
+            receipt: failure,
+          },
+          failureReceipts: [failure],
+        },
+      }),
+      "roadmap-only",
+      { issueNumber: 7, seedMarker: roadmap.children[0]!.seedMarker },
+      undefined,
+      { issue, child: roadmap.children[0]!, parentNumber: 6 },
+    )).resolves.toMatchObject({
+      action: "environment-blocker",
+      state: "parked",
+      detail: expect.stringContaining("environment blocker #100"),
+    });
+    expect(fixture.retries).toHaveLength(0);
+    expect(fixture.github.issues).toHaveLength(1);
+    const blocker = fixture.github.issues[0]!;
+    expect(blocker.labels).toEqual(["enhancement", "agent-ready", "priority:p1"]);
+    expect(blocker.labels).not.toContain("cold-start-roadmap");
+    expect(blocker.body).toContain("<!-- one-cli:trusted-execution:v1 -->");
+    expect(blocker.body).toContain("<!-- one-cli:environment-blocker:");
+    expect(blocker.body).toContain(
+      `Trusted approved paths (exact JSON): ${JSON.stringify([
+        "src/autonomy/sandbox.ts",
+        "src/autonomy/process.ts",
+        "tests/unit/autonomy-adapters.test.ts",
+      ])}`,
+    );
+    expect(fixture.github.updatedLabels.get(7)).toEqual([
+      "enhancement",
+      "cold-start-roadmap",
+      "priority:p1",
+    ]);
+    expect(fixture.journal.read().some((event) =>
+      event.type === "harness.environment-blocker-created"
+    )).toBe(true);
+  });
+
   it("creates one normalized quarantined remediation outside roadmap intake", async () => {
     const fixture = recoveryFixture();
     const failure = receipt();
@@ -363,9 +433,17 @@ function recoveryFixture(now?: () => number) {
 
 class RecoveryGitHub {
   readonly issues: HostIssue[] = [];
+  readonly updatedLabels = new Map<number, string[]>();
 
   async findIssuesByMarker(marker: string): Promise<readonly HostIssue[]> {
     return this.issues.filter((issue) => issue.body.includes(marker));
+  }
+
+  async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      issue.labels.includes("agent-ready") &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
   async createIssue(input: {
@@ -383,6 +461,21 @@ class RecoveryGitHub {
     };
     this.issues.push(issue);
     return issue;
+  }
+
+  async updateIssue(
+    number: number,
+    input: { labels?: readonly string[] },
+  ): Promise<HostIssue> {
+    if (input.labels) this.updatedLabels.set(number, [...input.labels]);
+    return {
+      number,
+      title: `issue-${number}`,
+      body: "",
+      labels: [...(input.labels ?? [])],
+      state: "open",
+      htmlUrl: `https://example.test/issues/${number}`,
+    };
   }
 }
 
@@ -418,6 +511,10 @@ class HandoffGitHub {
 
   async listSeedMarkerIssues(): Promise<readonly HostIssue[]> {
     return [this.parent, ...this.children];
+  }
+
+  async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return [];
   }
 
   async findMergedPullForIssue(issueNumber: number): Promise<PullEvidence | undefined> {

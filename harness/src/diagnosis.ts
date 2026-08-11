@@ -8,6 +8,7 @@ export type DiagnosisCategory =
 export type RecoveryDecision =
   | "retry-same-state"
   | "retry-implement"
+  | "decompose-issue"
   | "quarantine"
   | "park";
 
@@ -45,6 +46,8 @@ const TRANSIENT =
   /\b(?:econnreset|econnrefused|enetunreach|eai_again|dns|network|socket hang up|timed? ?out|timeout|temporary|temporarily|rate limit|too many requests|http 429|http 5\d\d|provider unavailable|service unavailable)\b/iu;
 const ENVIRONMENT =
   /\b(?:command not found|enoent|not installed|missing executable|cannot find module|module not found|unsupported platform|toolchain|sandbox unavailable|no such file or directory|exit handler never called|error with npm itself|error writing to the directory)\b/iu;
+const SANDBOX_DECOMPOSE =
+  /\b(?:kill eperm|operation not permitted|\/private\/var\/select|failed to terminate forks worker|sandbox-exec|one_cli_sandboxed|target pgrp)\b/iu;
 
 export function diagnoseFailure(
   receipt: FailureReceiptView,
@@ -64,6 +67,14 @@ export function diagnoseFailure(
       decision: "park",
       backoffMs: 0,
       reason: "Deterministic policy or governance boundary matched the failure receipt",
+    };
+  } else if (SANDBOX_DECOMPOSE.test(text)) {
+    result = {
+      category: "environment/toolchain",
+      decision: "decompose-issue",
+      backoffMs: 0,
+      reason:
+        "Sandbox or process-signal failure is outside the current issue approved paths and must become a new agent-ready issue",
     };
   } else if (
     receipt.timedOut ||

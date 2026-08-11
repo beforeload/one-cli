@@ -74,6 +74,24 @@ export class ColdStartSupervisor {
         doctor.checks.filter((check) => !check.ok).map((check) => check.name).join(", "),
       );
     }
+    const environmentBlockers = await this.recovery.listActiveEnvironmentBlockers(signal);
+    if (environmentBlockers.length > 1) {
+      return this.block(
+        "environment-blocker",
+        "Multiple open agent-ready environment blockers are present",
+      );
+    }
+    if (environmentBlockers[0]) {
+      const blocker = environmentBlockers[0];
+      const tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      this.dependencies.journal.append("harness.environment-blocker-tick", {
+        blockerIssueNumber: blocker.number,
+        action: tick.action,
+        state: tick.state,
+        detail: tick.detail ?? null,
+      });
+      return this.tickResult(tick, "normal");
+    }
     const initialNext = initialIssues.children.find(({ issue }) => issue.state === "open");
     const initialBinding = initialNext
       ? roadmapBinding(initialNext.child.seedMarker, initialNext.issue.number)
@@ -85,6 +103,13 @@ export class ColdStartSupervisor {
       recoveryScope,
       recoveryScope === "roadmap-only" ? initialBinding : undefined,
       signal,
+      initialNext
+        ? {
+            issue: initialNext.issue,
+            child: initialNext.child,
+            parentNumber: invariantParent.number,
+          }
+        : undefined,
     );
     if (recovery) return recovery;
     if (initialNext) {

@@ -13,10 +13,22 @@ import type {
   OneCliClient,
   RecoveryEvidence,
 } from "./one-cli.js";
-import { APPROVED_PATHS_PREFIX, NORMALIZED_FIELDS, type RoadmapChild } from "./roadmap.js";
+import {
+  APPROVED_PATHS_PREFIX,
+  NORMALIZED_FIELDS,
+  TRUSTED_EXECUTION_MARKER,
+  type RoadmapChild,
+} from "./roadmap.js";
 
 const HASH = /^[0-9a-f]{64}$/u;
 const MAX_BACKOFF_MS = 30 * 60_000;
+const ENVIRONMENT_BLOCKER_PREFIX = "<!-- one-cli:environment-blocker:";
+/** Product paths the coding agent may change; harness/** stays builder-protected. */
+export const SANDBOX_BLOCKER_APPROVED_PATHS = [
+  "src/autonomy/sandbox.ts",
+  "src/autonomy/process.ts",
+  "tests/unit/autonomy-adapters.test.ts",
+] as const;
 
 export interface RecoveryTickResult {
   action: string;
@@ -48,11 +60,17 @@ export class HarnessRecovery {
     scope: "normal" | "roadmap-only",
     expected?: ExpectedRoadmapBinding,
     signal?: AbortSignal,
+    decompose?: {
+      issue: HostIssue;
+      child: RoadmapChild;
+      parentNumber: number;
+    },
   ): Promise<RecoveryTickResult | undefined> {
     const attempt = status.activeAttempt;
-    if (!attempt || attempt.state !== "waiting_evidence") return undefined;
+    if (!attempt || !["waiting_evidence", "waiting"].includes(attempt.state)) return undefined;
     let receipt = newestFailureReceipt(attempt);
     if (!receipt) {
+      if (attempt.state !== "waiting_evidence") return undefined;
       const operation = legacyFailureOperation(attempt);
       if (!operation.startsWith("gate:")) {
         return this.park(
@@ -102,6 +120,24 @@ export class HarnessRecovery {
           ...(advice?.trim() ? { modelAdvice: advice.trim().slice(0, 2_000) } : {}),
         }
       : diagnoseFailure(receipt, advice === undefined ? {} : { modelAdvice: advice });
+    if (diagnosis.decision === "decompose-issue") {
+      this.appendDiagnosisOnce(attempt, receipt, diagnosis);
+      if (!decompose) {
+        return this.park(
+          "recovery-park",
+          `${diagnosis.category}: decompose required but roadmap context is missing`,
+          scope,
+        );
+      }
+      return await this.decomposeOutOfScopeEnvironmentBlocker(
+        receipt,
+        decompose.issue,
+        decompose.child,
+        decompose.parentNumber,
+        diagnosis,
+        signal,
+      );
+    }
     if (diagnosis.decision === "park" || diagnosis.decision === "quarantine") {
       this.appendDiagnosisOnce(attempt, receipt, diagnosis);
       return this.park(
@@ -162,6 +198,68 @@ export class HarnessRecovery {
       phase: phase(scope),
       lane: "recovery",
       detail: `${diagnosis.category} recovery resumed ${target}`,
+    };
+  }
+
+  async listActiveEnvironmentBlockers(
+    signal?: AbortSignal,
+  ): Promise<readonly HostIssue[]> {
+    return await this.dependencies.github.listOpenEnvironmentBlockers(signal);
+  }
+
+  async decomposeOutOfScopeEnvironmentBlocker(
+    receipt: FailureReceiptView,
+    issue: HostIssue,
+    child: RoadmapChild,
+    parentNumber: number,
+    diagnosis: DeterministicDiagnosis,
+    signal?: AbortSignal,
+  ): Promise<RecoveryTickResult> {
+    const marker = `${ENVIRONMENT_BLOCKER_PREFIX}${receipt.fingerprint} -->`;
+    const existing = await this.dependencies.github.findIssuesByMarker(marker, signal);
+    if (existing.length > 1) {
+      return this.park(
+        "recovery-park",
+        "Environment blocker marker is duplicated",
+        "roadmap-only",
+      );
+    }
+    let blocker = existing[0];
+    if (!blocker) {
+      blocker = await this.dependencies.github.createIssue({
+        title: `Environment blocker: sandboxed unit gates for #${issue.number}`,
+        body: environmentBlockerBody(issue, child, parentNumber, receipt, diagnosis, marker),
+        labels: ["enhancement", "agent-ready", "priority:p1"],
+      }, signal);
+      this.dependencies.journal.append("harness.environment-blocker-created", {
+        operationId: operationKey("environment-blocker", receipt.fingerprint),
+        parentIssueNumber: issue.number,
+        blockerIssueNumber: blocker.number,
+        fingerprint: receipt.fingerprint,
+        approvedPaths: [...SANDBOX_BLOCKER_APPROVED_PATHS],
+      });
+    }
+    if (issue.labels.includes("agent-ready")) {
+      await this.dependencies.github.updateIssue(issue.number, {
+        labels: issue.labels.filter((label) => label !== "agent-ready"),
+      }, signal);
+      this.appendOnce(
+        "harness.environment-blocker-paused-roadmap",
+        operationKey("pause-roadmap", String(issue.number), receipt.fingerprint),
+        {
+          operationId: operationKey("pause-roadmap", String(issue.number), receipt.fingerprint),
+          roadmapIssueNumber: issue.number,
+          blockerIssueNumber: blocker.number,
+        },
+      );
+    }
+    return {
+      action: "environment-blocker",
+      state: "parked",
+      phase: "roadmap",
+      lane: "recovery",
+      detail:
+        `Paused #${issue.number}; coding agent owns environment blocker #${blocker.number}`,
     };
   }
 
@@ -419,6 +517,58 @@ function recoveredProbe(
       object(probe.receipt).hash === receipt.hash
     );
   });
+}
+
+function environmentBlockerBody(
+  issue: HostIssue,
+  child: RoadmapChild,
+  parentNumber: number,
+  receipt: FailureReceiptView,
+  diagnosis: DeterministicDiagnosis,
+  marker: string,
+): string {
+  const binding =
+    `${APPROVED_PATHS_PREFIX}${JSON.stringify([...SANDBOX_BLOCKER_APPROVED_PATHS])}`;
+  const fields: Record<(typeof NORMALIZED_FIELDS)[number], string> = {
+    sourceType: "self-discovery",
+    sourceLinkOrEvidence:
+      `Machine environment fingerprint ${receipt.fingerprint}. ${marker}\n` +
+      `Blocked roadmap child ${child.id} (#${issue.number}).`,
+    problemStatement:
+      `Sandboxed quality gates for #${issue.number} fail with process-signal or sandbox permission errors ` +
+      `(${diagnosis.reason}). The fix is outside that issue's approved paths.`,
+    userValue:
+      "Roadmap execution can resume once sandboxed unit/install gates terminate workers cleanly.",
+    scope:
+      `${binding}\nModify only these exact repository-relative paths. Do not touch harness/** ` +
+      `(builder-protected) or the paused roadmap child's unrelated paths.`,
+    nonGoals:
+      "Do not implement the paused roadmap feature itself, do not open manual PRs from a human, " +
+      "and do not weaken sandbox deny-default policy beyond the minimum signal/path grants required.",
+    acceptanceCriteria:
+      `${binding}\nSandboxed Node can stop its own fork workers without kill EPERM; unit gate under ` +
+      `DarwinSandbox completes without orphaned vitest workers; protected harness paths remain untouched.`,
+    testPlan:
+      "Run deterministic unit coverage for sandbox process-group signaling with no live provider calls.",
+    dogfoodPlan:
+      `After merge, roadmap #${issue.number} must re-enter verifying and pass local unit/install gates.`,
+    riskAndSecurityNotes:
+      "Keep deny-default sandbox; only allow process-group signals and the minimal runtime metadata paths required.",
+    duplicateSearchEvidence:
+      `Idempotent environment blocker marker ${marker}; linked paused issue #${issue.number}.`,
+    parentChildRelationship:
+      `Environment blocker for #${issue.number}. Roadmap parent: #${parentNumber}.`,
+    dependencyOrder:
+      `Execute and merge this blocker before resuming agent-ready on #${issue.number}.`,
+  };
+  return [
+    marker,
+    TRUSTED_EXECUTION_MARKER,
+    ...NORMALIZED_FIELDS.flatMap((field) => [
+      `## ${heading(field)}`,
+      fields[field],
+    ]),
+  ].join("\n\n");
 }
 
 function remediationBody(

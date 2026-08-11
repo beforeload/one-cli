@@ -662,6 +662,13 @@ class FakeGitHub implements GitHubPort {
     return this.issues.filter((issue) => issue.body.includes("<!-- one-cli:cold-start-seed:"));
   }
 
+  async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      issue.labels.includes("agent-ready") &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
+  }
+
   async assertDefaultBranchContains(): Promise<void> {}
 
   async assertCommitDescendsFrom(ancestorSha: string, descendantSha: string): Promise<void> {

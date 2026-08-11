@@ -32,6 +32,7 @@ export interface GitHubPort {
   findIssueByMarker(marker: string, signal?: AbortSignal): Promise<HostIssue | undefined>;
   listRoadmapIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   listSeedMarkerIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
+  listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   assertDefaultBranchContains(
     sha: string,
     branch: string,
@@ -148,6 +149,31 @@ export class GhClient implements GitHubPort {
       .filter((item) => !record(item, "search item").pull_request)
       .map(parseIssue)
       .filter((issue) => issue.body.includes("<!-- one-cli:cold-start-seed:"));
+  }
+
+  async listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]> {
+    const query =
+      `repo:${this.repository.owner}/${this.repository.repo} is:issue is:open ` +
+      `label:agent-ready in:body "<!-- one-cli:environment-blocker:"`;
+    const result = await this.api(
+      "GET",
+      `/search/issues?q=${encodeURIComponent(query)}&per_page=100`,
+      undefined,
+      signal,
+    );
+    const items = record(result, "environment blocker search").items;
+    if (!Array.isArray(items)) throw new Error("GitHub environment blocker search is invalid");
+    const total = record(result, "environment blocker search").total_count;
+    if (typeof total !== "number" || !Number.isSafeInteger(total) || total !== items.length) {
+      throw new Error("GitHub environment blocker inventory is truncated or invalid");
+    }
+    return items
+      .filter((item) => !record(item, "search item").pull_request)
+      .map(parseIssue)
+      .filter((issue) =>
+        issue.state === "open" &&
+        issue.labels.includes("agent-ready") &&
+        issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
   async assertDefaultBranchContains(
