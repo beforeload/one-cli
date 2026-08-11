@@ -814,6 +814,9 @@ export class AutonomyOrchestrator {
           recoveryOperationId: evidence.provenance.operationId,
           recoveryTarget: target,
           recoveryDiagnosis: verified.decision.diagnosis,
+          ...(verified.decision.reason === undefined
+            ? {}
+            : { recoveryReason: verified.decision.reason }),
           recoveryReceipt: jsonValue(verified.receipt),
         });
         const result = {
@@ -1139,7 +1142,8 @@ export class AutonomyOrchestrator {
           exactAuthor: this.dependencies.config.issuePolicy.authorization.apiAuthorExactMatch,
           requiredFields: this.dependencies.config.issuePolicy.normalization.requiredFields,
           branchExists,
-          pullRequestExists: pull !== undefined,
+          // Closed/merged PRs must not permanently quarantine the issue head.
+          pullRequestExists: pull !== undefined && pull.state === "open",
         })
       ) {
         continue;
@@ -1549,6 +1553,9 @@ export class AutonomyOrchestrator {
             : {
                 recovery: {
                   diagnosis: detailObject(current).recoveryDiagnosis,
+                  ...(detailObject(current).recoveryReason === undefined
+                    ? {}
+                    : { reason: detailObject(current).recoveryReason }),
                   receipt: detailObject(current).recoveryReceipt ?? null,
                 },
               }),
@@ -1657,12 +1664,19 @@ export class AutonomyOrchestrator {
         signal,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isTransient(message)) {
+        return this.transitionToWaiting(attempt, "verifying", {
+          reason: "independent review provider temporarily unavailable",
+          transient: message,
+        });
+      }
       return await this.blockAttempt(
         attempt,
         "review",
         {
           reason: "invalid independent review",
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         },
         signal,
       );
@@ -1712,7 +1726,15 @@ export class AutonomyOrchestrator {
     for (const gate of this.dependencies.config.qualityGates.localCommands) {
       const result = await sandbox.run(gate.name, signal);
       if (!processSucceeded(result)) {
-        if (isTransient(result.stderr)) {
+        // Soft-wait only for pure transport blips. Compiler/test evidence or
+        // sandbox kill EPERM must become durable failure receipts so recovery
+        // can diagnose and retry-implement instead of spinning on backoff.
+        const evidenceText = `${result.stdout}\n${result.stderr}\n${result.spawnError ?? ""}`;
+        const hasDeterministicEvidence =
+          /\b(?:error TS\d+|AssertionError|✖|×|Failed Tests|(?:tests?|test files?) failed|Test timed out|kill eperm|failed to terminate forks worker)\b/iu.test(
+            evidenceText,
+          );
+        if (isTransient(result.stderr) && !hasDeterministicEvidence) {
           const receipt = this.failureReceipt(
             current,
             `gate:${gate.name}`,
@@ -2932,7 +2954,16 @@ export class AutonomyOrchestrator {
 
   private safeTransition(attempt: Attempt, to: Attempt["state"], data: JsonValue): Attempt {
     const current = this.dependencies.store.getAttempt(attempt.id) ?? attempt;
-    if (current.state === to) return current;
+    if (current.state === to) {
+      // Same-state retries still need transition payloads (e.g. recoveryDiagnosis)
+      // merged into durable attempt detail for the worker envelope.
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        return this.updateAttempt(current, {
+          detail: mergeDetail(current, asRecord(data)),
+        });
+      }
+      return current;
+    }
     return this.transitionAttempt(current, to, data);
   }
 
@@ -2941,11 +2972,20 @@ export class AutonomyOrchestrator {
     to: Attempt["state"],
     data?: JsonValue,
   ): Attempt {
+    // Store.transitionAttempt journals `data` on the event but does not merge it into
+    // detail_json. Persist record payloads first so machine-retry recovery context
+    // (diagnosis/receipt) reaches the coding worker on the next implement tick.
+    const prepared =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? this.updateAttempt(attempt, {
+            detail: mergeDetail(attempt, asRecord(data)),
+          })
+        : attempt;
     return this.dependencies.store.transitionAttempt({
-      attemptId: attempt.id,
+      attemptId: prepared.id,
       to,
       ...(data === undefined ? {} : { data }),
-      lease: this.issueLease(attempt),
+      lease: this.issueLease(prepared),
       now: this.now(),
     });
   }
@@ -3375,7 +3415,12 @@ function syntheticProcessResult(exitCode: number | null, stderr: string): Proces
 }
 
 function isTransient(message: string): boolean {
-  return /\b(?:network|timed? ?out|rate.?limit|temporar|ECONN|EAI_AGAIN|503|502|CI queue)\b/iu.test(
+  // Vitest's "Test timed out in 5000ms" is deterministic suite evidence, not a
+  // transport blip — callers must combine this with hasDeterministicEvidence.
+  if (/\bTest timed out\b/u.test(message) || /\bFailed Tests\b/u.test(message)) {
+    return false;
+  }
+  return /\b(?:network|timed? ?out|rate.?limit|temporar|ECONN|EAI_AGAIN|429|504|503|502|CI queue|provider temporarily|service temporarily)\b/iu.test(
     message,
   );
 }

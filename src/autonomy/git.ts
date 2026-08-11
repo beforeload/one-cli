@@ -435,8 +435,14 @@ export class GitManager {
     const cwd = this.validateWorktree(worktree);
     const remote = checkedRemoteName(options.remote);
     const branch = checkedRef(options.branch, "Push branch");
+    // Prefer gh's non-interactive credential helper when GH_CONFIG_DIR/token is
+    // available so HTTPS remotes do not hang on terminal username prompts.
     const result = await this.git(
       [
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=!gh auth git-credential",
         "push",
         "--porcelain",
         ...(options.setUpstream === true ? ["--set-upstream"] : []),
@@ -624,7 +630,15 @@ function gitEnvironment(): Readonly<Record<string, string>> {
     GIT_TERMINAL_PROMPT: "0",
     LC_ALL: "C",
   };
-  for (const name of ["HOME", "PATH", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME"] as const) {
+  for (const name of [
+    "HOME",
+    "PATH",
+    "SSH_AUTH_SOCK",
+    "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+  ] as const) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }

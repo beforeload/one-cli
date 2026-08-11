@@ -443,8 +443,14 @@ export class GitHubClient implements GitHubPort {
     });
     if (!Array.isArray(value)) throw new Error("GitHub pulls response is not an array");
     const parsed = value.map(parsePullRequest);
-    if (parsed.length > 1) throw new Error("GitHub returned multiple pull requests for one head");
-    return parsed[0];
+    const open = parsed.filter((pull) => pull.state === "open");
+    if (open.length > 1) {
+      throw new Error("GitHub returned multiple open pull requests for one head");
+    }
+    if (open.length === 1) return open[0];
+    if (parsed.length === 0) return undefined;
+    // Prefer the newest closed/merged PR when no open PR exists.
+    return parsed.sort((left, right) => right.number - left.number)[0];
   }
 
   async createPullRequest(
@@ -822,8 +828,8 @@ function parsePullRequest(value: unknown): GitHubPullRequest {
     headRef: checkedRef(string(head.ref, "pull request head ref")),
     baseSha: checkedSha(string(base.sha, "pull request base SHA")),
     baseRef: checkedRef(string(base.ref, "pull request base ref")),
-    draft: boolean(object.draft, "pull request draft"),
-    merged: boolean(object.merged, "pull request merged"),
+    draft: boolean(object.draft ?? false, "pull request draft"),
+    merged: boolean(object.merged ?? false, "pull request merged"),
     mergeSha:
       object.merge_commit_sha === null
         ? null

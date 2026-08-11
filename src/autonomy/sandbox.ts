@@ -1,12 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   SpawnProcessRunner,
   type ProcessRequest,
   type ProcessResult,
   type ProcessRunner,
 } from "./process.js";
+
+type ProfileBuilder = typeof buildDarwinSandboxProfile;
 
 export interface SandboxAvailability {
   available: boolean;
@@ -147,7 +150,11 @@ export class DarwinSandbox implements SandboxPort {
     );
     const temporaryDirectory = path.join(temporaryHome, "tmp");
     fs.mkdirSync(temporaryDirectory, { mode: 0o700 });
-    const profile = buildDarwinSandboxProfile(
+    // Prefer the worktree's built profile builder after its build gate succeeds.
+    // Sandbox policy changes under test must apply to later gates in the same
+    // attempt; the host binary alone cannot see those unmerged edits.
+    const buildProfile = await resolveWorktreeProfileBuilder(this.workspace);
+    const profile = buildProfile(
       this.workspace,
       temporaryHome,
       command.executable,
@@ -174,6 +181,31 @@ export class DarwinSandbox implements SandboxPort {
       fs.rmSync(temporaryHome, { recursive: true, force: true });
     }
   }
+}
+
+/**
+ * Loads `buildDarwinSandboxProfile` from `<workspace>/dist/autonomy/sandbox.js`
+ * when present so an in-flight attempt can exercise its own sandbox policy.
+ * Falls back to the host module when the worktree has not built yet.
+ */
+export async function resolveWorktreeProfileBuilder(
+  workspace: string,
+): Promise<ProfileBuilder> {
+  const candidate = path.join(workspace, "dist", "autonomy", "sandbox.js");
+  try {
+    if (!fs.existsSync(candidate)) return buildDarwinSandboxProfile;
+    const real = fs.realpathSync(candidate);
+    if (!isWithin(workspace, real)) return buildDarwinSandboxProfile;
+    const mod = await import(
+      `${pathToFileURL(real).href}?mtime=${fs.statSync(real).mtimeMs}`
+    );
+    if (typeof mod.buildDarwinSandboxProfile === "function") {
+      return mod.buildDarwinSandboxProfile as ProfileBuilder;
+    }
+  } catch {
+    // Host builder remains authoritative when the worktree module is unusable.
+  }
+  return buildDarwinSandboxProfile;
 }
 
 export function buildDarwinSandboxProfile(
@@ -306,9 +338,8 @@ function sandboxEnvironment(
     HOME: temporaryHome,
     TMPDIR: temporaryDirectory,
     LC_ALL: "C",
-    // Mark every descendant as running inside a sandbox so that nested tooling
-    // (and unit tests) can detect the enclosing sandbox and avoid spawning a
-    // second, guaranteed-to-fail sandbox-exec layer that macOS rejects.
+    // Descendants (including vitest) can detect the enclosing DarwinSandbox and
+    // skip nested live sandbox-exec layers that macOS rejects with exit 71.
     ONE_CLI_SANDBOXED: "1",
   };
   const pathValue = process.env.PATH;

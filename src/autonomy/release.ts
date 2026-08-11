@@ -669,7 +669,14 @@ function copyDirectory(context: CopyContext, relative: string): void {
     }
     const childRelative = `${relative}/${entry.name}`;
     const childSource = sourcePath(context, childRelative);
-    const stat = lstatNoSymlink(childSource, childRelative);
+    const stat = fs.lstatSync(childSource);
+    // npm writes package bin shims as symlinks under node_modules/.bin. Releases
+    // execute via the package entrypoint (`node dist/index.js`), so omit that
+    // directory instead of rejecting an otherwise valid install tree.
+    if (childRelative === "node_modules/.bin") continue;
+    if (stat.isSymbolicLink()) {
+      throw new Error(`${childRelative} must not be a symbolic link`);
+    }
     if (stat.isDirectory()) copyDirectory(context, childRelative);
     else if (stat.isFile()) copyOneFile(context, childRelative, stat);
     else throw new Error(`Release contains a non-regular entry: ${childRelative}`);
