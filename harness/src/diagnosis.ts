@@ -49,7 +49,7 @@ const ENVIRONMENT =
 const SANDBOX_DECOMPOSE =
   /\b(?:kill eperm|operation not permitted|\/private\/var\/select|failed to terminate forks worker|sandbox-exec|one_cli_sandboxed|target pgrp)\b/iu;
 const CODE_GATE_EVIDENCE =
-  /\b(?:error TS\d+|FAIL(?:ED)?\b|AssertionError|✖|×|tests? failed|tsc\b|TypeError:)\b/iu;
+  /\b(?:error TS\d+|AssertionError|✖|×|(?:tests?|test files?) failed|TypeError:)\b/iu;
 
 export function diagnoseFailure(
   receipt: FailureReceiptView,
