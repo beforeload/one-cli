@@ -61,10 +61,12 @@ export class SpawnProcessRunner implements ProcessRunner {
     const timeoutMs = request.timeoutMs ?? 60_000;
     const maxOutputBytes = request.maxOutputBytes ?? 4 * 1024 * 1024;
     const started = Date.now();
+    const detached =
+      process.platform !== "win32" && process.env.ONE_CLI_SANDBOXED !== "1";
     return await new Promise<ProcessResult>((resolve) => {
       const child = spawn(request.executable, [...request.args], {
         shell: false,
-        detached: process.platform !== "win32",
+        detached,
         stdio: ["pipe", "pipe", "pipe"],
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
         ...(request.env === undefined ? {} : { env: { ...request.env } as NodeJS.ProcessEnv }),
@@ -80,7 +82,7 @@ export class SpawnProcessRunner implements ProcessRunner {
 
       const kill = (signal: NodeJS.Signals): void => {
         try {
-          if (child.pid !== undefined && process.platform !== "win32") {
+          if (child.pid !== undefined && detached) {
             process.kill(-child.pid, signal);
           } else {
             child.kill(signal);

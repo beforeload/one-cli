@@ -74,6 +74,23 @@ describe("cold-start harness", () => {
     await expect(cancelled).resolves.toMatchObject({ cancelled: true });
   });
 
+  it("keeps subprocesses in the sandbox process group when marked", async () => {
+    const previous = process.env.ONE_CLI_SANDBOXED;
+    process.env.ONE_CLI_SANDBOXED = "1";
+    try {
+      const result = await new SpawnProcessRunner().run({
+        executable: process.execPath,
+        args: ["-e", "setInterval(()=>{},1000)"],
+        timeoutMs: 20,
+        maxOutputBytes: 1_024,
+      });
+      expect(result).toMatchObject({ timedOut: true, signal: "SIGTERM" });
+    } finally {
+      if (previous === undefined) delete process.env.ONE_CLI_SANDBOXED;
+      else process.env.ONE_CLI_SANDBOXED = previous;
+    }
+  });
+
   it("redacts every host secret from multiline output and spawn errors", async () => {
     const secret = "host-secret-value";
     const runner = new SpawnProcessRunner([secret]);

@@ -388,6 +388,7 @@ describe("portable autonomy adapters", () => {
     const profile = request?.args[1];
     expect(profile).toContain("(deny default)");
     expect(profile).toContain("(deny network*)");
+    expect(profile).toContain("(allow signal (target pgrp))");
     expect(profile).toContain('(allow file-read-data (literal "/"))');
     expect(profile).toContain(
       `(allow file-read-metadata (literal ${JSON.stringify(path.dirname(fs.realpathSync(workspace)))})`,
@@ -399,6 +400,7 @@ describe("portable autonomy adapters", () => {
     expect(request?.timeoutMs).toBe(1_234);
     expect(request?.maxOutputBytes).toBe(4_321);
     expect(request?.env?.HOME).not.toBe(process.env.HOME);
+    expect(request?.env?.ONE_CLI_SANDBOXED).toBe("1");
     expect(request?.env?.HOME).toMatch(
       new RegExp(`^${escapeRegex(fs.realpathSync(os.tmpdir()))}${path.sep}`),
     );
@@ -428,6 +430,32 @@ describe("portable autonomy adapters", () => {
     expect(result.exitCode).toBe(0);
     expect(result.signal).toBeNull();
     expect(result.stdout).toMatch(/^v\d+\.\d+\.\d+/u);
+  });
+
+  it("allows a sandboxed Node process to stop its own fork worker group", async () => {
+    if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) return;
+    const workspace = path.join(root, "node-signal-workspace");
+    fs.mkdirSync(workspace);
+    const sandbox = new DarwinSandbox({
+      workspace,
+      commands: {
+        node: {
+          executable: fs.realpathSync(process.execPath),
+          args: [
+            "-e",
+            "const {spawn}=require('node:child_process');" +
+              "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)']);" +
+              "child.once('spawn',()=>child.kill('SIGTERM'));" +
+              "child.once('exit',()=>process.stdout.write('stopped'));",
+          ],
+        },
+      },
+    });
+
+    const result = await sandbox.run("node");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("stopped");
   });
 
   it("keeps local quality gates bounded with a ten-minute default", async () => {

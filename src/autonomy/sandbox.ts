@@ -216,6 +216,7 @@ export function buildDarwinSandboxProfile(
         : `(allow file-read* (subpath ${profileString(root)}))`,
     ),
     "(allow process-fork)",
+    "(allow signal (target pgrp))",
     `(allow process-exec (literal ${profileString(executable)}))`,
     `(allow process-exec (subpath ${profileString(workspace)}))`,
     ...runtimeRoots
@@ -238,6 +239,7 @@ function defaultRuntimeRoots(): string[] {
     "/bin",
     "/dev",
     "/private/var/db/timezone",
+    "/private/var/select",
     "/Library/Apple/System/Library",
     nodeDirectory,
     path.dirname(nodeDirectory),
@@ -273,6 +275,7 @@ function sandboxEnvironment(
     HOME: temporaryHome,
     TMPDIR: temporaryDirectory,
     LC_ALL: "C",
+    ONE_CLI_SANDBOXED: "1",
   };
   const pathValue = process.env.PATH;
   if (pathValue !== undefined) environment.PATH = pathValue;

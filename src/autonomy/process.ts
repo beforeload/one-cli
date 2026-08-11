@@ -432,6 +432,8 @@ export class SpawnProcessRunner implements ProcessRunner {
   async run(request: ProcessRequest): Promise<ProcessResult> {
     assertRequest(request);
     const started = Date.now();
+    const detached =
+      process.platform !== "win32" && process.env.ONE_CLI_SANDBOXED !== "1";
 
     return await new Promise<ProcessResult>((resolve) => {
       const child = spawn(request.executable, [...request.args], {
@@ -439,7 +441,7 @@ export class SpawnProcessRunner implements ProcessRunner {
         ...(request.env === undefined
           ? {}
           : { env: { ...request.env } as NodeJS.ProcessEnv }),
-        detached: process.platform !== "win32",
+        detached,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -469,7 +471,7 @@ export class SpawnProcessRunner implements ProcessRunner {
 
       const kill = (signal: NodeJS.Signals): void => {
         try {
-          if (child.pid !== undefined && process.platform !== "win32") {
+          if (child.pid !== undefined && detached) {
             process.kill(-child.pid, signal);
           } else {
             child.kill(signal);
