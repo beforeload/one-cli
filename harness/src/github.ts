@@ -33,6 +33,7 @@ export interface GitHubPort {
   listRoadmapIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   listSeedMarkerIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]>;
+  listExhaustedEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   assertDefaultBranchContains(
     sha: string,
     branch: string,
@@ -152,9 +153,28 @@ export class GhClient implements GitHubPort {
   }
 
   async listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]> {
+    return await this.searchEnvironmentBlockers("agent-ready", signal);
+  }
+
+  async listExhaustedEnvironmentBlockers(
+    signal?: AbortSignal,
+  ): Promise<readonly HostIssue[]> {
+    const failed = await this.searchEnvironmentBlockers("agent-failed", signal);
+    const quarantined = await this.searchEnvironmentBlockers("quarantined", signal);
+    const byNumber = new Map<number, HostIssue>();
+    for (const issue of [...failed, ...quarantined]) {
+      byNumber.set(issue.number, issue);
+    }
+    return [...byNumber.values()].sort((left, right) => left.number - right.number);
+  }
+
+  private async searchEnvironmentBlockers(
+    label: "agent-ready" | "agent-failed" | "quarantined",
+    signal?: AbortSignal,
+  ): Promise<readonly HostIssue[]> {
     const query =
       `repo:${this.repository.owner}/${this.repository.repo} is:issue is:open ` +
-      `label:agent-ready in:body "<!-- one-cli:environment-blocker:"`;
+      `label:${label} in:body "<!-- one-cli:environment-blocker:"`;
     const result = await this.api(
       "GET",
       `/search/issues?q=${encodeURIComponent(query)}&per_page=100`,
@@ -171,7 +191,7 @@ export class GhClient implements GitHubPort {
       .map(parseIssue)
       .filter((issue) =>
         issue.state === "open" &&
-        issue.labels.includes("agent-ready") &&
+        issue.labels.includes(label) &&
         issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 

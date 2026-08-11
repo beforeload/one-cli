@@ -82,6 +82,14 @@ export class ColdStartSupervisor {
       );
     }
     const environmentBlockers = await this.recovery.listActiveEnvironmentBlockers(signal);
+    if (environmentBlockers.length === 0) {
+      const normalStatus = await this.dependencies.oneCli.status("normal", undefined, signal);
+      const restored = await this.recovery.restoreTransientExhaustedEnvironmentBlockers(
+        normalStatus,
+        signal,
+      );
+      if (restored) return restored;
+    }
     if (environmentBlockers.length > 1) {
       return this.block(
         "environment-blocker",

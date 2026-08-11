@@ -238,6 +238,56 @@ describe("harness machine recovery", () => {
     expect(fixture.retries).toHaveLength(0);
   });
 
+  it("restores agent-ready on transient-exhausted environment blockers", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "worker",
+      source: "worker",
+      stderr: "provider_error",
+      fingerprint: "a".repeat(64),
+      hash: "b".repeat(64),
+    });
+    fixture.github.issues.push({
+      number: 29,
+      title: "Environment blocker",
+      body: "<!-- one-cli:environment-blocker:deadbeef -->",
+      labels: ["enhancement", "agent-failed", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/29",
+    });
+    const detail = {
+      lastFailure: {
+        operation: "worker",
+        fingerprint: failure.fingerprint,
+        receipt: failure,
+      },
+      failureReceipts: [failure],
+    };
+    const autonomy = status({
+      state: "failed",
+      detail,
+      active: false,
+    });
+    autonomy.attempts = [{
+      id: "attempt-29",
+      issueId: "github-29",
+      state: "failed",
+      prNumber: null,
+      detail,
+    }];
+    await expect(
+      fixture.recovery.restoreTransientExhaustedEnvironmentBlockers(autonomy),
+    ).resolves.toMatchObject({
+      action: "environment-blocker-restored",
+      state: "succeeded",
+    });
+    expect(fixture.github.updatedLabels.get(29)).toEqual([
+      "enhancement",
+      "priority:p1",
+      "agent-ready",
+    ]);
+  });
+
   it("decomposes a blocked historical roadmap attempt with sandbox kill EPERM", async () => {
     const fixture = recoveryFixture();
     const failure = receipt({
@@ -531,6 +581,13 @@ class RecoveryGitHub {
       issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
+  async listExhaustedEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      (issue.labels.includes("agent-failed") || issue.labels.includes("quarantined")) &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
+  }
+
   async createIssue(input: {
     title: string;
     body: string;
@@ -552,8 +609,12 @@ class RecoveryGitHub {
     number: number,
     input: { labels?: readonly string[] },
   ): Promise<HostIssue> {
-    if (input.labels) this.updatedLabels.set(number, [...input.labels]);
-    return {
+    const issue = this.issues.find((candidate) => candidate.number === number);
+    if (input.labels) {
+      this.updatedLabels.set(number, [...input.labels]);
+      if (issue) issue.labels = [...input.labels];
+    }
+    return issue ?? {
       number,
       title: `issue-${number}`,
       body: "",
@@ -599,6 +660,10 @@ class HandoffGitHub {
   }
 
   async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return [];
+  }
+
+  async listExhaustedEnvironmentBlockers(): Promise<readonly HostIssue[]> {
     return [];
   }
 

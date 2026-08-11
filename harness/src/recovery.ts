@@ -217,6 +217,56 @@ export class HarnessRecovery {
     return await this.dependencies.github.listOpenEnvironmentBlockers(signal);
   }
 
+  async restoreTransientExhaustedEnvironmentBlockers(
+    status: AutonomyStatus,
+    signal?: AbortSignal,
+  ): Promise<RecoveryTickResult | undefined> {
+    const exhausted = await this.dependencies.github.listExhaustedEnvironmentBlockers(signal);
+    for (const issue of exhausted) {
+      const attempt = [...status.attempts]
+        .reverse()
+        .find((candidate) => candidate.issueId === `github-${issue.number}`);
+      if (!attempt || attempt.state !== "failed") continue;
+      const receipt = newestFailureReceipt(attempt);
+      if (!receipt) continue;
+      const diagnosis = diagnoseFailure(receipt);
+      if (diagnosis.category !== "transient/network/provider") continue;
+      const operationId = operationKey(
+        "restore-blocker",
+        String(issue.number),
+        receipt.fingerprint,
+        receipt.hash,
+      );
+      if (this.eventFor("harness.environment-blocker-restored", operationId)) {
+        continue;
+      }
+      const labels = [
+        ...new Set([
+          ...issue.labels.filter(
+            (label) => label !== "agent-failed" && label !== "quarantined",
+          ),
+          "agent-ready",
+        ]),
+      ];
+      await this.dependencies.github.updateIssue(issue.number, { labels }, signal);
+      this.appendOnce("harness.environment-blocker-restored", operationId, {
+        operationId,
+        issueNumber: issue.number,
+        attemptId: attempt.id,
+        fingerprint: receipt.fingerprint,
+        category: diagnosis.category,
+      });
+      return {
+        action: "environment-blocker-restored",
+        state: "succeeded",
+        phase: "roadmap",
+        lane: "recovery",
+        detail: `Restored agent-ready on transient-exhausted environment blocker #${issue.number}`,
+      };
+    }
+    return undefined;
+  }
+
   async cancelNonTerminalIssueAttempts(
     status: AutonomyStatus,
     issue: HostIssue,

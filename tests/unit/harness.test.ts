@@ -688,6 +688,13 @@ class FakeGitHub implements GitHubPort {
       issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
+  async listExhaustedEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      (issue.labels.includes("agent-failed") || issue.labels.includes("quarantined")) &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
+  }
+
   async assertDefaultBranchContains(): Promise<void> {}
 
   async assertCommitDescendsFrom(ancestorSha: string, descendantSha: string): Promise<void> {
