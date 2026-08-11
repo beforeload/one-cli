@@ -6,6 +6,8 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+# Least privilege for the Actions GITHUB_TOKEN: enough to open branches/PRs,
+# but not a long-lived PAT that can bypass branch protection.
 permissions:
   contents: write
   issues: write
@@ -24,9 +26,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          # Prefer a bot PAT when present so pushes / PR creation survive
-          # GITHUB_TOKEN branch protections; fall back to the workflow token.
-          token: ${{ secrets.ONE_BOT_TOKEN || github.token }}
+          token: ${{ github.token }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -34,8 +34,9 @@ jobs:
         with:
           node-version: 22.13.0
 
-      - name: Install CodeBuddy Code
-        run: npm install -g @tencent-ai/codebuddy-code@latest
+      - name: Install pinned CodeBuddy Code
+        # Pin an exact release; do not use @latest (mutable supply chain).
+        run: npm install -g @tencent-ai/codebuddy-code@2.133.1
 
       - name: Configure git identity (one-bot)
         env:
@@ -67,8 +68,8 @@ jobs:
           fi
 
       - name: Write CodeBuddy run-driver settings
-        # gateway.runTimeoutMs bounds /api/v1/runs and headless agent wall-clock
-        # for this job; keep aligned with the job timeout-minutes: 90.
+        # gateway.runTimeoutMs bounds agent wall-clock; keep aligned with
+        # timeout-minutes: 90 on this job.
         run: |
           set -euo pipefail
           mkdir -p "${HOME}/.codebuddy"
@@ -80,8 +81,8 @@ jobs:
           CODEBUDDY_API_KEY: ${{ secrets.CODEBUDDY_API_KEY }}
           CODEBUDDY_MODEL: ${{ vars.CODEBUDDY_MODEL }}
           CODEBUDDY_INTERNET_ENVIRONMENT: ${{ vars.CODEBUDDY_INTERNET_ENVIRONMENT }}
-          GH_TOKEN: ${{ secrets.ONE_BOT_TOKEN || github.token }}
-          GITHUB_TOKEN: ${{ secrets.ONE_BOT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           GIT_AUTHOR_NAME: one-bot
           GIT_COMMITTER_NAME: one-bot
           GIT_AUTHOR_EMAIL: one-bot@users.noreply.github.com
@@ -95,21 +96,26 @@ jobs:
           Prefer open Issues labeled agent-ready authored by beforeload. Do not invent work
           when the trusted queue is empty — exit cleanly after reporting idle.
 
-          In this tick:
+          Hard limits for this tick:
+          - Never edit or commit protected paths: .github/workflows/**, harness/**, AUTONOMY.md,
+            .autonomy/**, or autonomy control-plane modules listed in AUTONOMY.md.
+          - Never merge to main. Never force-push. Never change branch protection or secrets.
+          - Only push feature branches and open/update PRs with gh.
+
+          Steps:
           1. Inspect open agent-ready issues with gh.
           2. If one is actionable, implement the smallest bounded change on a feature branch.
-          3. Keep protected paths untouched (.github/workflows/**, harness/**, AUTONOMY.md,
-             .autonomy/**, autonomy control-plane modules listed in AUTONOMY.md).
-          4. Run the relevant local checks you can (npm test / targeted vitest) before pushing.
-          5. Open or update a PR with a concise summary; do not merge.
+          3. Run targeted checks you can (npm test / vitest) before pushing.
+          4. Open or update a PR with a concise summary; stop.
 
-          Use git identity one-bot. Prefer gh for GitHub mutations. Stop when blocked by
-          missing approvals, protected-path policy, or an empty queue.
+          Use git identity one-bot.
           EOF
           )"
-          codebuddy -p -y \
+          # Shell is limited to gh/git/npm/npx/node prefixes; no broad Bash(*),
+          # no -y / dangerously-skip-permissions, and only the ephemeral GITHUB_TOKEN.
+          codebuddy -p \
             --model "${CODEBUDDY_MODEL}" \
             --permission-mode acceptEdits \
-            --allowedTools "Read,Edit,Write,Bash,Grep" \
+            --allowedTools "Read,Edit,Write,Grep,Bash(gh:*),Bash(git:*),Bash(npm:*),Bash(npx:*),Bash(node:*)" \
             --settings "${HOME}/.codebuddy/settings.json" \
             "${PROMPT}"
