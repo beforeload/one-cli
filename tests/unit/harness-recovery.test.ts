@@ -338,6 +338,7 @@ describe("harness machine recovery", () => {
     expect(fixture.journal.read().some((event) =>
       event.type === "harness.environment-blocker-created"
     )).toBe(true);
+    expect(fixture.cancellations.length).toBeGreaterThan(0);
   });
 
   it("creates one normalized quarantined remediation outside roadmap intake", async () => {
@@ -454,6 +455,7 @@ function recoveryFixture(now?: () => number) {
   const github = new RecoveryGitHub();
   const probes: Array<{ receipt: FailureReceiptView }> = [];
   const retries: RecoveryEvidence[] = [];
+  const cancellations: string[] = [];
   const oneCli = {
     probeFailureGate: async () => {
       const captured = receipt({ operation: "gate:install", gate: "install" });
@@ -473,12 +475,28 @@ function recoveryFixture(now?: () => number) {
       retries.push(evidence);
       return { action: "machine-retry", state: "implementing", attemptId: "attempt-7" };
     },
+    status: async () => status({
+      state: "blocked",
+      detail: {
+        failureReceipt: receipt({
+          operation: "gate:unit",
+          stderr: "kill EPERM",
+          fingerprint: "d".repeat(64),
+          hash: "e".repeat(64),
+        }),
+      },
+    }),
+    cancel: async (attemptId: string) => {
+      cancellations.push(attemptId);
+      return { action: "cancel", state: "cancelled", attemptId };
+    },
   } as unknown as OneCliClient;
   return {
     journal,
     github,
     probes,
     retries,
+    cancellations,
     recovery: new HarnessRecovery({
       oneCli,
       github: github as unknown as GitHubPort,

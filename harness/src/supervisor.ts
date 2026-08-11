@@ -83,6 +83,27 @@ export class ColdStartSupervisor {
     }
     if (environmentBlockers[0]) {
       const blocker = environmentBlockers[0];
+      // Cancel paused roadmap attempts that still hold the active lease/claim.
+      for (const entry of initialIssues.children) {
+        if (
+          entry.issue.state !== "open" ||
+          entry.issue.labels.includes("agent-ready")
+        ) {
+          continue;
+        }
+        const binding = roadmapBinding(entry.child.seedMarker, entry.issue.number);
+        const pausedStatus = await this.dependencies.oneCli.status(
+          "roadmap-only",
+          binding,
+          signal,
+        );
+        await this.recovery.cancelNonTerminalIssueAttempts(
+          pausedStatus,
+          entry.issue,
+          entry.child,
+          signal,
+        );
+      }
       const tick = await this.dependencies.oneCli.once("normal", undefined, signal);
       this.dependencies.journal.append("harness.environment-blocker-tick", {
         blockerIssueNumber: blocker.number,

@@ -12,7 +12,10 @@ import type {
   ExpectedRoadmapBinding,
   OneCliClient,
   RecoveryEvidence,
+  TickOutput,
 } from "./one-cli.js";
+
+type TickOutputLike = Pick<TickOutput, "action" | "state">;
 import {
   APPROVED_PATHS_PREFIX,
   NORMALIZED_FIELDS,
@@ -214,6 +217,43 @@ export class HarnessRecovery {
     return await this.dependencies.github.listOpenEnvironmentBlockers(signal);
   }
 
+  async cancelNonTerminalIssueAttempts(
+    status: AutonomyStatus,
+    issue: HostIssue,
+    child: RoadmapChild,
+    signal?: AbortSignal,
+  ): Promise<readonly TickOutputLike[]> {
+    const issueId = `github-${issue.number}`;
+    const expected = { issueNumber: issue.number, seedMarker: child.seedMarker };
+    const results: TickOutputLike[] = [];
+    for (const attempt of status.attempts) {
+      if (
+        attempt.issueId !== issueId ||
+        ["succeeded", "failed", "cancelled", "delivered"].includes(attempt.state)
+      ) {
+        continue;
+      }
+      const tick = await this.dependencies.oneCli.cancel(
+        attempt.id,
+        "roadmap-only",
+        expected,
+        signal,
+      );
+      this.appendOnce(
+        "harness.environment-blocker-cancelled-attempt",
+        operationKey("cancel", attempt.id),
+        {
+          operationId: operationKey("cancel", attempt.id),
+          issueNumber: issue.number,
+          attemptId: attempt.id,
+          state: tick.state,
+        },
+      );
+      results.push(tick);
+    }
+    return results;
+  }
+
   async decomposeBlockedRoadmapEnvironment(
     status: AutonomyStatus,
     issue: HostIssue,
@@ -293,6 +333,13 @@ export class HarnessRecovery {
         },
       );
     }
+    // Free the coordinator so normal-scope execution can select the blocker issue.
+    const status = await this.dependencies.oneCli.status(
+      "roadmap-only",
+      { issueNumber: issue.number, seedMarker: child.seedMarker },
+      signal,
+    );
+    await this.cancelNonTerminalIssueAttempts(status, issue, child, signal);
     return {
       action: "environment-blocker",
       state: "parked",
