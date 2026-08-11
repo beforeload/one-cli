@@ -1675,10 +1675,21 @@ export class AutonomyOrchestrator {
         signal,
       );
     }
-    const criticalApprovalRequired = deterministic.findings.some(
-      (finding) =>
-        finding.code === "dependency-change" || finding.code === "critical-system-change",
-    );
+    const criticalApprovalRequired = deterministic.findings.some((finding) => {
+      if (
+        finding.code !== "dependency-change" &&
+        finding.code !== "critical-system-change"
+      ) {
+        return false;
+      }
+      // Trusted approved-path bindings already authorize these exact paths.
+      const approvedPaths = optionalStringArray(detailObject(attempt).approvedPaths);
+      return !(
+        approvedPaths !== undefined &&
+        typeof finding.path === "string" &&
+        approvedPaths.includes(finding.path)
+      );
+    });
     let current = this.updateAttempt(attempt, {
       detail: mergeDetail(attempt, {
         deterministicReview: jsonValue(deterministic),
