@@ -1106,7 +1106,9 @@ export class AutonomyOrchestrator {
       if (
         issue.labels.includes("parent") ||
         (this.dependencies.executionScope === "roadmap-only" &&
-          !issue.labels.includes(COLD_START_ROADMAP_LABEL))
+          !issue.labels.includes(COLD_START_ROADMAP_LABEL)) ||
+        (this.dependencies.executionScope === "normal" &&
+          issue.labels.includes(COLD_START_ROADMAP_LABEL))
       ) {
         continue;
       }
