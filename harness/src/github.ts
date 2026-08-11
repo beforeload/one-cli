@@ -32,6 +32,8 @@ export interface GitHubPort {
   findIssueByMarker(marker: string, signal?: AbortSignal): Promise<HostIssue | undefined>;
   listRoadmapIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   listSeedMarkerIssues(signal?: AbortSignal): Promise<readonly HostIssue[]>;
+  listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]>;
+  listExhaustedEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]>;
   assertDefaultBranchContains(
     sha: string,
     branch: string,
@@ -148,6 +150,49 @@ export class GhClient implements GitHubPort {
       .filter((item) => !record(item, "search item").pull_request)
       .map(parseIssue)
       .filter((issue) => issue.body.includes("<!-- one-cli:cold-start-seed:"));
+  }
+
+  async listOpenEnvironmentBlockers(signal?: AbortSignal): Promise<readonly HostIssue[]> {
+    return await this.searchEnvironmentBlockers("agent-ready", signal);
+  }
+
+  async listExhaustedEnvironmentBlockers(
+    signal?: AbortSignal,
+  ): Promise<readonly HostIssue[]> {
+    const failed = await this.searchEnvironmentBlockers("agent-failed", signal);
+    const quarantined = await this.searchEnvironmentBlockers("quarantined", signal);
+    const byNumber = new Map<number, HostIssue>();
+    for (const issue of [...failed, ...quarantined]) {
+      byNumber.set(issue.number, issue);
+    }
+    return [...byNumber.values()].sort((left, right) => left.number - right.number);
+  }
+
+  private async searchEnvironmentBlockers(
+    label: "agent-ready" | "agent-failed" | "quarantined",
+    signal?: AbortSignal,
+  ): Promise<readonly HostIssue[]> {
+    const query =
+      `repo:${this.repository.owner}/${this.repository.repo} is:issue is:open ` +
+      `label:${label} in:body "<!-- one-cli:environment-blocker:"`;
+    const result = await this.api(
+      "GET",
+      `/search/issues?q=${encodeURIComponent(query)}&per_page=100`,
+      undefined,
+      signal,
+    );
+    const items = record(result, "environment blocker search").items;
+    if (!Array.isArray(items)) throw new Error("GitHub environment blocker search is invalid");
+    if (items.length >= 100) {
+      throw new Error("GitHub environment blocker inventory exceeds the strict single-page bound");
+    }
+    return items
+      .filter((item) => !record(item, "search item").pull_request)
+      .map(parseIssue)
+      .filter((issue) =>
+        issue.state === "open" &&
+        issue.labels.includes(label) &&
+        issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
   async assertDefaultBranchContains(

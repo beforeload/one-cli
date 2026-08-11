@@ -31,6 +31,15 @@ describe("harness machine recovery", () => {
   it("uses deterministic categories and never lets model advice choose policy", () => {
     expect(diagnoseFailure(receipt({ stderr: "ECONNRESET from provider" })).category)
       .toBe("transient/network/provider");
+    expect(diagnoseFailure(receipt({
+      operation: "worker",
+      source: "worker",
+      stderr: "provider_error",
+    }))).toMatchObject({
+      category: "transient/network/provider",
+      decision: "retry-same-state",
+      target: "same-state",
+    });
     expect(diagnoseFailure(receipt({ spawnError: "ENOENT", exitCode: 127 })).category)
       .toBe("environment/toolchain");
     expect(diagnoseFailure(receipt({
@@ -40,6 +49,33 @@ describe("harness machine recovery", () => {
       category: "environment/toolchain",
       decision: "retry-same-state",
       target: "verifying",
+    });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "[vitest-pool]: Failed to terminate forks worker. Error: kill EPERM",
+    }))).toMatchObject({
+      category: "environment/toolchain",
+      decision: "decompose-issue",
+    });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stdout: "fails closed on protected path requires approval",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted\nkill EPERM",
+    }))).toMatchObject({
+      category: "environment/toolchain",
+      decision: "decompose-issue",
+    });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:build",
+      gate: "build",
+      stdout: "src/autonomy/process.ts(471,28): error TS2379: Argument of type",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted",
+    }))).toMatchObject({
+      category: "code/gate",
+      decision: "retry-implement",
+      target: "implementing",
     });
     expect(diagnoseFailure(receipt({ operation: "gate:test", gate: "test" })).decision)
       .toBe("retry-implement");
@@ -212,6 +248,168 @@ describe("harness machine recovery", () => {
     expect(fixture.retries).toHaveLength(0);
   });
 
+  it("restores agent-ready on transient-exhausted environment blockers", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "worker",
+      source: "worker",
+      stderr: "provider_error",
+      fingerprint: "a".repeat(64),
+      hash: "b".repeat(64),
+    });
+    fixture.github.issues.push({
+      number: 29,
+      title: "Environment blocker",
+      body: "<!-- one-cli:environment-blocker:deadbeef -->",
+      labels: ["enhancement", "agent-failed", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/29",
+    });
+    const detail = {
+      lastFailure: {
+        operation: "worker",
+        fingerprint: failure.fingerprint,
+        receipt: failure,
+      },
+      failureReceipts: [failure],
+    };
+    const autonomy = status({
+      state: "failed",
+      detail,
+      active: false,
+    });
+    autonomy.attempts = [{
+      id: "attempt-29",
+      issueId: "github-29",
+      state: "failed",
+      prNumber: null,
+      detail,
+    }];
+    await expect(
+      fixture.recovery.restoreTransientExhaustedEnvironmentBlockers(autonomy),
+    ).resolves.toMatchObject({
+      action: "environment-blocker-restored",
+      state: "succeeded",
+    });
+    expect(fixture.github.updatedLabels.get(29)).toEqual([
+      "enhancement",
+      "priority:p1",
+      "agent-ready",
+    ]);
+  });
+
+  it("decomposes a blocked historical roadmap attempt with sandbox kill EPERM", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "Failed to terminate forks worker. Error: kill EPERM",
+      fingerprint: "f".repeat(64),
+      hash: "1".repeat(64),
+    });
+    const issue: HostIssue = {
+      number: 7,
+      title: roadmap.children[0]!.title,
+      body: roadmap.children[0]!.seedMarker,
+      labels: ["enhancement", "cold-start-roadmap", "agent-ready", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/7",
+    };
+    const blocked = status({
+      state: "planning",
+      detail: {},
+    });
+    blocked.attempts = [
+      {
+        id: "attempt-old",
+        issueId: "github-7",
+        state: "blocked",
+        prNumber: null,
+        detail: {
+          gate: "unit",
+          failureReceipt: failure,
+          failureReceipts: [failure],
+        },
+      },
+      blocked.activeAttempt!,
+    ];
+    await expect(fixture.recovery.decomposeBlockedRoadmapEnvironment(
+      blocked,
+      issue,
+      roadmap.children[0]!,
+      6,
+    )).resolves.toMatchObject({
+      action: "environment-blocker",
+      state: "parked",
+    });
+    expect(fixture.github.issues).toHaveLength(1);
+    expect(fixture.github.updatedLabels.get(7)).toContain("priority:p1");
+    expect(fixture.github.updatedLabels.get(7)).not.toContain("agent-ready");
+  });
+
+  it("decomposes sandbox kill EPERM into a new agent-ready issue and pauses the roadmap child", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted\nkill EPERM",
+      fingerprint: "d".repeat(64),
+      hash: "e".repeat(64),
+    });
+    const issue: HostIssue = {
+      number: 7,
+      title: roadmap.children[0]!.title,
+      body: roadmap.children[0]!.seedMarker,
+      labels: ["enhancement", "cold-start-roadmap", "agent-ready", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/7",
+    };
+    await expect(fixture.recovery.recoverWaitingAttempt(
+      status({
+        state: "waiting",
+        detail: {
+          lastFailure: {
+            operation: "gate:unit",
+            fingerprint: failure.fingerprint,
+            receipt: failure,
+          },
+          failureReceipts: [failure],
+        },
+      }),
+      "roadmap-only",
+      { issueNumber: 7, seedMarker: roadmap.children[0]!.seedMarker },
+      undefined,
+      { issue, child: roadmap.children[0]!, parentNumber: 6 },
+    )).resolves.toMatchObject({
+      action: "environment-blocker",
+      state: "parked",
+      detail: expect.stringContaining("environment blocker #100"),
+    });
+    expect(fixture.retries).toHaveLength(0);
+    expect(fixture.github.issues).toHaveLength(1);
+    const blocker = fixture.github.issues[0]!;
+    expect(blocker.labels).toEqual(["enhancement", "agent-ready", "priority:p1"]);
+    expect(blocker.labels).not.toContain("cold-start-roadmap");
+    expect(blocker.body).toContain("<!-- one-cli:trusted-execution:v1 -->");
+    expect(blocker.body).toContain("<!-- one-cli:environment-blocker:");
+    expect(blocker.body).toContain(
+      `Trusted approved paths (exact JSON): ${JSON.stringify([
+        "src/autonomy/sandbox.ts",
+        "src/autonomy/process.ts",
+        "tests/unit/autonomy-adapters.test.ts",
+      ])}`,
+    );
+    expect(fixture.github.updatedLabels.get(7)).toEqual([
+      "enhancement",
+      "cold-start-roadmap",
+      "priority:p1",
+    ]);
+    expect(fixture.journal.read().some((event) =>
+      event.type === "harness.environment-blocker-created"
+    )).toBe(true);
+    expect(fixture.cancellations.length).toBeGreaterThan(0);
+  });
+
   it("creates one normalized quarantined remediation outside roadmap intake", async () => {
     const fixture = recoveryFixture();
     const failure = receipt();
@@ -326,6 +524,7 @@ function recoveryFixture(now?: () => number) {
   const github = new RecoveryGitHub();
   const probes: Array<{ receipt: FailureReceiptView }> = [];
   const retries: RecoveryEvidence[] = [];
+  const cancellations: string[] = [];
   const oneCli = {
     probeFailureGate: async () => {
       const captured = receipt({ operation: "gate:install", gate: "install" });
@@ -345,12 +544,28 @@ function recoveryFixture(now?: () => number) {
       retries.push(evidence);
       return { action: "machine-retry", state: "implementing", attemptId: "attempt-7" };
     },
+    status: async () => status({
+      state: "blocked",
+      detail: {
+        failureReceipt: receipt({
+          operation: "gate:unit",
+          stderr: "kill EPERM",
+          fingerprint: "d".repeat(64),
+          hash: "e".repeat(64),
+        }),
+      },
+    }),
+    cancel: async (attemptId: string) => {
+      cancellations.push(attemptId);
+      return { action: "cancel", state: "cancelled", attemptId };
+    },
   } as unknown as OneCliClient;
   return {
     journal,
     github,
     probes,
     retries,
+    cancellations,
     recovery: new HarnessRecovery({
       oneCli,
       github: github as unknown as GitHubPort,
@@ -363,9 +578,24 @@ function recoveryFixture(now?: () => number) {
 
 class RecoveryGitHub {
   readonly issues: HostIssue[] = [];
+  readonly updatedLabels = new Map<number, string[]>();
 
   async findIssuesByMarker(marker: string): Promise<readonly HostIssue[]> {
     return this.issues.filter((issue) => issue.body.includes(marker));
+  }
+
+  async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      issue.labels.includes("agent-ready") &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
+  }
+
+  async listExhaustedEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return this.issues.filter((issue) =>
+      issue.state === "open" &&
+      (issue.labels.includes("agent-failed") || issue.labels.includes("quarantined")) &&
+      issue.body.includes("<!-- one-cli:environment-blocker:"));
   }
 
   async createIssue(input: {
@@ -383,6 +613,25 @@ class RecoveryGitHub {
     };
     this.issues.push(issue);
     return issue;
+  }
+
+  async updateIssue(
+    number: number,
+    input: { labels?: readonly string[] },
+  ): Promise<HostIssue> {
+    const issue = this.issues.find((candidate) => candidate.number === number);
+    if (input.labels) {
+      this.updatedLabels.set(number, [...input.labels]);
+      if (issue) issue.labels = [...input.labels];
+    }
+    return issue ?? {
+      number,
+      title: `issue-${number}`,
+      body: "",
+      labels: [...(input.labels ?? [])],
+      state: "open",
+      htmlUrl: `https://example.test/issues/${number}`,
+    };
   }
 }
 
@@ -418,6 +667,14 @@ class HandoffGitHub {
 
   async listSeedMarkerIssues(): Promise<readonly HostIssue[]> {
     return [this.parent, ...this.children];
+  }
+
+  async listOpenEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return [];
+  }
+
+  async listExhaustedEnvironmentBlockers(): Promise<readonly HostIssue[]> {
+    return [];
   }
 
   async findMergedPullForIssue(issueNumber: number): Promise<PullEvidence | undefined> {

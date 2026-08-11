@@ -79,6 +79,7 @@ describe("MaintenanceCoordinator", () => {
       action: "global-dogfood",
       state: "succeeded",
     });
+    expect(harness.orchestrator.acquireNextIssue).toHaveBeenCalledTimes(1);
     expect(harness.git.createDetachedWorktree).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
@@ -95,6 +96,27 @@ describe("MaintenanceCoordinator", () => {
       .toBe(harness.now() + GLOBAL_DOGFOOD_INTERVAL_MS);
   });
 
+  it("prefers a ready issue over due global dogfood", async () => {
+    const harness = createHarness();
+    due(harness.store, "global-dogfood", harness.now());
+    harness.orchestrator.acquireNextIssue.mockResolvedValue({
+      action: "select",
+      state: "issue_selected",
+      detail: "selected agent-ready issue",
+    });
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "select",
+      state: "issue_selected",
+    });
+    expect(harness.sandbox.run).not.toHaveBeenCalled();
+    expect(
+      harness.store
+        .listEvents({ aggregateType: "maintenance" })
+        .map((event) => event.type),
+    ).toContain("maintenance.ready-queue.preempt");
+  });
+
   it("preserves failure evidence and creates a self-discovery issue", async () => {
     const harness = createHarness({ failCommand: "integration" });
     due(harness.store, "global-dogfood", harness.now());
@@ -103,6 +125,7 @@ describe("MaintenanceCoordinator", () => {
       action: "global-dogfood",
       state: "blocked",
     });
+    expect(harness.orchestrator.acquireNextIssue).toHaveBeenCalledTimes(1);
     expect(harness.intake.promoteSelfDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
         finding: expect.objectContaining({

@@ -291,10 +291,21 @@ export class GitManager {
     const branch = checkedRef(options.branch, "Branch");
     const startPoint = checkedRef(options.startPoint, "Start point");
     const worktreePath = this.worktreePath(repository.id, id);
-    if (fs.existsSync(worktreePath)) {
-      throw new Error(`Worktree already exists: ${repository.id}/${id}`);
-    }
     this.assertCanonicalManagedPath(this.worktreesRoot, this.storageRoot);
+    if (fs.existsSync(worktreePath)) {
+      this.assertCanonicalManagedPath(worktreePath, this.worktreesRoot);
+      const listed = await this.git(
+        [`--git-dir=${barePath}`, "worktree", "list", "--porcelain"],
+        undefined,
+        options.signal,
+      );
+      assertProcessSucceeded("git worktree list", listed);
+      if (listed.stdout.split(/\r?\n/u).some((line) => line === `worktree ${worktreePath}`)) {
+        return { id, repositoryId: repository.id, path: worktreePath };
+      }
+      // Orphan directory left after a crash: remove and recreate below.
+      fs.rmSync(worktreePath, { recursive: true, force: true });
+    }
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true, mode: 0o700 });
     this.assertCanonicalManagedPath(path.dirname(worktreePath), this.worktreesRoot);
 
@@ -424,8 +435,14 @@ export class GitManager {
     const cwd = this.validateWorktree(worktree);
     const remote = checkedRemoteName(options.remote);
     const branch = checkedRef(options.branch, "Push branch");
+    // Prefer gh's non-interactive credential helper when GH_CONFIG_DIR/token is
+    // available so HTTPS remotes do not hang on terminal username prompts.
     const result = await this.git(
       [
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=!gh auth git-credential",
         "push",
         "--porcelain",
         ...(options.setUpstream === true ? ["--set-upstream"] : []),
@@ -613,7 +630,15 @@ function gitEnvironment(): Readonly<Record<string, string>> {
     GIT_TERMINAL_PROMPT: "0",
     LC_ALL: "C",
   };
-  for (const name of ["HOME", "PATH", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME"] as const) {
+  for (const name of [
+    "HOME",
+    "PATH",
+    "SSH_AUTH_SOCK",
+    "XDG_CONFIG_HOME",
+    "GH_CONFIG_DIR",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+  ] as const) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }

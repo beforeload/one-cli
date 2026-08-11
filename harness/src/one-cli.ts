@@ -154,6 +154,9 @@ export class OneCliClient {
       signal,
       false,
     );
+    if (!result.stdout.trim()) {
+      throw new Error(`one-cli once returned no JSON: ${stderrDetail(result.stderr)}`);
+    }
     const tick = parseTick(parseJson(result.stdout, "once"));
     if (result.exitCode !== 0 && !["blocked", "failed", "in_doubt"].includes(tick.state)) {
       requireSuccess("one-cli autonomy once", result);
@@ -184,6 +187,35 @@ export class OneCliClient {
       signal,
     );
     return parseFailureGateProbe(parseJson(result.stdout, "recover probe"));
+  }
+
+  async cancel(
+    attemptId: string,
+    scope: "normal" | "roadmap-only",
+    expected?: ExpectedRoadmapBinding,
+    signal?: AbortSignal,
+  ): Promise<TickOutput> {
+    const result = await this.invoke(
+      [
+        "cancel",
+        attemptId,
+        "--mode",
+        "auto-merge",
+        "--output",
+        "json",
+        ...scopeArgs(scope, expected),
+      ],
+      signal,
+      false,
+    );
+    if (!result.stdout.trim()) {
+      throw new Error(`one-cli cancel returned no JSON: ${stderrDetail(result.stderr)}`);
+    }
+    const tick = parseTick(parseJson(result.stdout, "cancel"));
+    if (result.exitCode !== 0 && !["in_doubt", "cancelled"].includes(tick.state)) {
+      requireSuccess("one-cli autonomy cancel", result);
+    }
+    return tick;
   }
 
   async machineRetry(
@@ -405,6 +437,12 @@ function parseJson(value: string, label: string): unknown {
   } catch {
     throw new Error(`one-cli ${label} returned malformed JSON`);
   }
+}
+
+function stderrDetail(stderr: string): string {
+  const lines = stderr.trim().split(/\r?\n/u).filter((line) => line.length > 0);
+  const autonomy = [...lines].reverse().find((line) => line.startsWith("Autonomy error:"));
+  return (autonomy ?? lines.at(-1) ?? "empty stderr").slice(0, 400);
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {

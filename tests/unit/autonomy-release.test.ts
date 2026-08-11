@@ -153,6 +153,44 @@ describe("immutable autonomy releases", () => {
     expect(fs.existsSync(path.join(releasesDir, FIRST_SHA))).toBe(false);
   });
 
+  it("omits npm node_modules/.bin shims while still rejecting other symlinks", async () => {
+    const worktree = createArtifact(root, "npm-bin");
+    const binDir = path.join(worktree, "node_modules", ".bin");
+    const target = path.join(worktree, "node_modules", "production-dependency", "index.js");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.symlinkSync(path.relative(binDir, target), path.join(binDir, "prod-dep"));
+
+    const staged = await releases.stage({
+      worktreePath: worktree,
+      commitSha: FIRST_SHA,
+      binding: binding(FIRST_SHA),
+    });
+    expect(fs.existsSync(path.join(staged.releasePath, "node_modules", ".bin"))).toBe(false);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(staged.releasePath, "manifest.json"), "utf8")).files.map(
+        (file: { path: string }) => file.path,
+      ),
+    ).toEqual([
+      "dist/index.js",
+      "node_modules/production-dependency/index.js",
+      "package.json",
+    ]);
+
+    const sneaky = createArtifact(root, "sneaky-link");
+    fs.symlinkSync(
+      path.join(sneaky, "node_modules", "production-dependency", "index.js"),
+      path.join(sneaky, "node_modules", "sneaky-link"),
+    );
+    runner.headSha = SECOND_SHA;
+    await expect(
+      releases.stage({
+        worktreePath: sneaky,
+        commitSha: SECOND_SHA,
+        binding: binding(SECOND_SHA),
+      }),
+    ).rejects.toThrow(/symbolic link/u);
+  });
+
   it("manifests every payload file and detects later tampering", async () => {
     const worktree = createArtifact(root, "integrity");
     const staged = await releases.stage({

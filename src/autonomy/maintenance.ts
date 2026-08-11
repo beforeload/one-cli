@@ -467,7 +467,19 @@ export class MaintenanceCoordinator {
 
       const now = this.now();
       const due = this.scheduler.ensureDueTimestamps(now);
+      // Trusted agent-ready work preempts due dogfood so environment blockers and
+      // other ready issues are not starved by a failing maintenance dogfood tick.
+      // Overdue community-scan lateness preemption below is intentionally preserved.
+      this.dependencies.store.expireGapFindings(this.dependencies.config.policyHash, now);
       if (due.globalDogfood <= now) {
+        const readyBeforeDogfood =
+          await this.dependencies.orchestrator.acquireNextIssue(controller.signal);
+        if (readyBeforeDogfood.state !== "idle") {
+          this.record("maintenance.ready-queue.preempt", {
+            beforeDogfood: true,
+          });
+          return readyBeforeDogfood;
+        }
         const action = computeNextScheduledAction({
           now,
           reconcileRequired: false,
@@ -501,7 +513,6 @@ export class MaintenanceCoordinator {
         });
       }
 
-      this.dependencies.store.expireGapFindings(this.dependencies.config.policyHash, now);
       const scanYield = this.scanPreemptionYieldRequired();
       const readyQueueTurn = this.readyQueueTurnRequired() || scanYield;
       if (!readyQueueTurn) {

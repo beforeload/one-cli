@@ -13,6 +13,13 @@ import { seedRoadmap } from "./seed.js";
 import type { SeedOperationStore } from "./seed-state.js";
 
 const FAIL_CLOSED_STATES = new Set(["in_doubt", "blocked"]);
+const ENVIRONMENT_BLOCKER_DRAIN_ACTIONS = new Set([
+  "global-dogfood",
+  "community-scan",
+  "community-scan-pending",
+  "user-promotion",
+  "gap-promotion",
+]);
 const SHA = /^[0-9a-f]{40,64}$/u;
 
 export interface RoadmapHandoff {
@@ -74,17 +81,135 @@ export class ColdStartSupervisor {
         doctor.checks.filter((check) => !check.ok).map((check) => check.name).join(", "),
       );
     }
+    const environmentBlockers = await this.recovery.listActiveEnvironmentBlockers(signal);
+    if (environmentBlockers.length === 0) {
+      const normalStatus = await this.dependencies.oneCli.status("normal", undefined, signal);
+      const restored = await this.recovery.restoreTransientExhaustedEnvironmentBlockers(
+        normalStatus,
+        signal,
+      );
+      if (restored) return restored;
+    }
+    if (environmentBlockers.length > 1) {
+      return this.block(
+        "environment-blocker",
+        "Multiple open agent-ready environment blockers are present",
+      );
+    }
+    if (environmentBlockers[0]) {
+      const blocker = environmentBlockers[0];
+      // Cancel paused roadmap attempts that still hold the active lease/claim.
+      for (const entry of initialIssues.children) {
+        if (
+          entry.issue.state !== "open" ||
+          entry.issue.labels.includes("agent-ready")
+        ) {
+          continue;
+        }
+        const binding = roadmapBinding(entry.child.seedMarker, entry.issue.number);
+        const pausedStatus = await this.dependencies.oneCli.status(
+          "roadmap-only",
+          binding,
+          signal,
+        );
+        await this.recovery.cancelNonTerminalIssueAttempts(
+          pausedStatus,
+          entry.issue,
+          entry.child,
+          signal,
+        );
+      }
+      // Recover a waiting blocker attempt before spending another selection tick.
+      const blockerStatus = await this.dependencies.oneCli.status("normal", undefined, signal);
+      const blockerRecovery = await this.recovery.recoverWaitingAttempt(
+        blockerStatus,
+        "normal",
+        undefined,
+        signal,
+      );
+      if (
+        blockerRecovery &&
+        ["parked", "blocked", "quarantined"].includes(blockerRecovery.state)
+      ) {
+        return blockerRecovery;
+      }
+      if (blockerRecovery) {
+        this.dependencies.journal.append("harness.environment-blocker-recovered", {
+          blockerIssueNumber: blocker.number,
+          action: blockerRecovery.action,
+          state: blockerRecovery.state,
+          detail: blockerRecovery.detail,
+        });
+      }
+      // Drain due maintenance so the open environment blocker can be selected
+      // without waiting for the next harness interval.
+      let tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      for (
+        let drained = 0;
+        ENVIRONMENT_BLOCKER_DRAIN_ACTIONS.has(tick.action) && drained < 3;
+        drained++
+      ) {
+        this.dependencies.journal.append("harness.environment-blocker-drained", {
+          blockerIssueNumber: blocker.number,
+          action: tick.action,
+          state: tick.state,
+          detail: tick.detail ?? null,
+          drained: drained + 1,
+        });
+        tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      }
+      this.dependencies.journal.append("harness.environment-blocker-tick", {
+        blockerIssueNumber: blocker.number,
+        action: tick.action,
+        state: tick.state,
+        detail: tick.detail ?? null,
+      });
+      if (tick.state === "waiting_evidence") {
+        const waitingStatus = await this.dependencies.oneCli.status(
+          "normal",
+          undefined,
+          signal,
+        );
+        const waitingRecovery = await this.recovery.recoverWaitingAttempt(
+          waitingStatus,
+          "normal",
+          undefined,
+          signal,
+        );
+        if (waitingRecovery) return waitingRecovery;
+      }
+      // Stay on the roadmap phase: blocker recovery runs before durable handoff.
+      return this.tickResult(tick, "roadmap");
+    }
     const initialNext = initialIssues.children.find(({ issue }) => issue.state === "open");
     const initialBinding = initialNext
       ? roadmapBinding(initialNext.child.seedMarker, initialNext.issue.number)
       : undefined;
     let status = await this.dependencies.oneCli.status("roadmap-only", initialBinding, signal);
     const recoveryScope = initialNext ? "roadmap-only" : "normal";
+    // Out-of-scope sandbox blockers must preempt retries on the current roadmap child.
+    if (initialNext) {
+      const decomposed = await this.recovery.decomposeBlockedRoadmapEnvironment(
+        status,
+        initialNext.issue,
+        initialNext.child,
+        invariantParent.number,
+        signal,
+      );
+      if (decomposed) return decomposed;
+    }
     const recovery = await this.recovery.recoverWaitingAttempt(
       status,
       recoveryScope,
       recoveryScope === "roadmap-only" ? initialBinding : undefined,
       signal,
+      initialNext
+        ? {
+            issue: initialNext.issue,
+            child: initialNext.child,
+            parentNumber: invariantParent.number,
+          }
+        : undefined,
     );
     if (recovery) return recovery;
     if (initialNext) {
@@ -491,7 +616,12 @@ export function readRoadmapHandoff(journal: HostJournal): RoadmapHandoff | undef
   const handoffs = events.filter((event) => event.type === "roadmap.handoff.completed");
   if (handoffs.length > 1) throw new Error("Durable roadmap handoff evidence is duplicated");
   if (handoffs.length === 0) {
-    if (events.some(isNormalTickEvent)) {
+    // Environment-blocker recovery may have historically journaled phase=normal ticks
+    // before handoff; those must not require durable handoff evidence.
+    const hasEnvironmentBlockerLane = events.some((event) =>
+      event.type.startsWith("harness.environment-blocker-"),
+    );
+    if (events.some(isNormalTickEvent) && !hasEnvironmentBlockerLane) {
       throw new Error("Durable roadmap handoff evidence is missing after normal execution");
     }
     return undefined;

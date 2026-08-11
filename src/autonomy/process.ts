@@ -73,10 +73,14 @@ export interface MachineRecoveryDecision {
     | "policy/governance"
     | "unknown";
   target?: "same-state" | "implementing" | "verifying";
+  /** Non-authoritative operator/agent hint derived from the receipt text. */
+  reason?: string;
 }
 
 const POLICY_FAILURE =
-  /\b(?:approval|required approval|governance|policy|protected path|outside (?:the )?approved|roadmap binding|permission denied|unauthori[sz]ed|forbidden|self-approv|credential|secret)\b/iu;
+  /\b(?:approval|required approval|governance|policy|protected path|outside (?:the )?approved|roadmap binding|permission denied|unauthori[sz]ed|forbidden|self-approv|(?<![\w-])credential(?!-free)|secret)\b/iu;
+const CODE_GATE_EVIDENCE =
+  /\b(?:error TS\d+|AssertionError|✖|×|Failed Tests|(?:tests?|test files?) failed|Test timed out|TypeError:)\b/iu;
 const TRANSIENT_FAILURE =
   /\b(?:econnreset|econnrefused|enetunreach|eai_again|dns|network|socket hang up|timed? ?out|timeout|temporary|temporarily|rate limit|too many requests|http 429|http 5\d\d|provider unavailable|service unavailable)\b/iu;
 const ENVIRONMENT_FAILURE =
@@ -297,6 +301,31 @@ export function deriveMachineRecoveryDecision(receipt: FailureReceipt): MachineR
     receipt.stderr,
     receipt.spawnError ?? "",
   ].join("\n");
+  // Vitest listings often include the word "credential" inside passing test titles.
+  // Concrete gate/test evidence must remain retryable.
+  if (
+    CODE_GATE_EVIDENCE.test(text) &&
+    (receipt.operation === "worker" ||
+      receipt.operation === "diff" ||
+      receipt.operation.startsWith("gate:") ||
+      receipt.source === "github-check")
+  ) {
+    const exactOptional =
+      /\berror TS2379\b/u.test(text) && /\bexactOptionalPropertyTypes\b/u.test(text);
+    return {
+      diagnosis: "code/gate",
+      target: "implementing",
+      ...(exactOptional
+        ? {
+            reason:
+              "TypeScript exactOptionalPropertyTypes mismatch (TS2379): optional properties must allow undefined (e.g. change `pid?: number` to `pid?: number | undefined`)",
+          }
+        : {
+            reason:
+              "Independent verifier vetoed loopback network in network=false profiles. Remove localhost loopback allows; skip tests/integration/cli.test.ts fake-provider cases when ONE_CLI_SANDBOXED=1; keep signal grants, temporaryHome process-exec, and nested sandbox-exec skip",
+          }),
+    };
+  }
   if (POLICY_FAILURE.test(text)) return { diagnosis: "policy/governance" };
   if (
     receipt.gate !== null &&
@@ -331,7 +360,18 @@ export function deriveMachineRecoveryDecision(receipt: FailureReceipt): MachineR
     receipt.operation.startsWith("gate:") ||
     receipt.source === "github-check"
   ) {
-    return { diagnosis: "code/gate", target: "implementing" };
+    const exactOptional =
+      /\berror TS2379\b/u.test(text) && /\bexactOptionalPropertyTypes\b/u.test(text);
+    return {
+      diagnosis: "code/gate",
+      target: "implementing",
+      ...(exactOptional
+        ? {
+            reason:
+              "TypeScript exactOptionalPropertyTypes mismatch (TS2379): optional properties must allow undefined (e.g. change `pid?: number` to `pid?: number | undefined`)",
+          }
+        : {}),
+    };
   }
   return { diagnosis: "unknown" };
 }
