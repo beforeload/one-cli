@@ -112,12 +112,16 @@ export function diagnoseFailure(
     receipt.operation.startsWith("gate:") ||
     receipt.source === "github-check"
   ) {
+    const exactOptional =
+      /\berror TS2379\b/u.test(text) && /\bexactOptionalPropertyTypes\b/u.test(text);
     result = {
       category: "code/gate",
       decision: "retry-implement",
       target: "implementing",
       backoffMs: 0,
-      reason: "A deterministic implementation or quality-gate operation failed",
+      reason: exactOptional
+        ? "TypeScript exactOptionalPropertyTypes mismatch (TS2379): optional properties must allow undefined (e.g. change `pid?: number` to `pid?: number | undefined`)"
+        : "A deterministic implementation or quality-gate operation failed",
     };
   } else {
     result = {
