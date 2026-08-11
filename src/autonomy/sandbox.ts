@@ -206,23 +206,16 @@ export function buildDarwinSandboxProfile(
     "(version 1)",
     "(deny default)",
     // Full outbound network is granted only for the trusted install command.
-    // When network is otherwise denied, loopback (127.0.0.1/::1) bind, listen,
-    // and connect must still be allowed: sandboxed unit/integration gates start
-    // in-process fake providers that bind an ephemeral loopback socket, and a
-    // blanket (deny network*) rejects that bind with listen EPERM, timing out
-    // every test that talks to the fake provider. Loopback stays inside the
-    // sandboxed host and never reaches the outside world, so the deny-default
-    // policy remains intact for any non-loopback address. macOS evaluates
-    // network filters top-down, so the loopback allow precedes the residual
-    // (deny network*) that still forbids all off-host traffic.
+    // Otherwise all network access — including loopback (127.0.0.1/::1) — stays
+    // denied. An independent verifier vetoed loopback allows in network=false
+    // profiles because even host-local sockets widen the deny-default surface,
+    // so no loopback grant is emitted here. Sandboxed unit/integration gates
+    // that need an in-process fake provider must instead skip those cases when
+    // ONE_CLI_SANDBOXED=1 rather than open a loopback bind. The blanket
+    // (deny network*) keeps the profile strictly deny-default for every address.
     ...(network
       ? ["(allow network-outbound)", "(allow network-inbound)"]
-      : [
-          '(allow network-bind (local ip "localhost:*"))',
-          '(allow network-inbound (local ip "localhost:*"))',
-          '(allow network-outbound (remote ip "localhost:*"))',
-          "(deny network*)",
-        ]),
+      : ["(deny network*)"]),
     '(allow file-read-data (literal "/"))',
     ...traversalRoots.map((root) =>
       `(allow file-read-metadata (literal ${profileString(root)}))`

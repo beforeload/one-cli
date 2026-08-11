@@ -395,16 +395,16 @@ describe("portable autonomy adapters", () => {
     );
     expect(profile).toContain(`(subpath ${JSON.stringify(fs.realpathSync(workspace))})`);
     expect(profile).not.toContain("(allow file-read*)");
-    // Loopback bind/listen/connect is allowed so sandboxed gates can start
-    // in-process fake providers, but every loopback grant is scoped to
-    // localhost and no unrestricted (off-host) network grant may leak in.
-    expect(profile).toContain('(allow network-bind (local ip "localhost:*"))');
-    expect(profile).toContain('(allow network-inbound (local ip "localhost:*"))');
-    expect(profile).toContain('(allow network-outbound (remote ip "localhost:*"))');
-    expect(profile).not.toContain("(allow network-outbound)\n");
+    // No loopback network grant may be present: an independent verifier vetoed
+    // loopback allows in network=false profiles, so the profile stays strictly
+    // deny-default for every address including localhost.
+    expect(profile).not.toContain('(allow network-bind (local ip "localhost:*"))');
+    expect(profile).not.toContain('(allow network-inbound (local ip "localhost:*"))');
+    expect(profile).not.toContain('(allow network-outbound (remote ip "localhost:*"))');
     expect(profile?.split("\n")).not.toContain("(allow network-outbound)");
     expect(profile?.split("\n")).not.toContain("(allow network-inbound)");
     expect(profile?.split("\n")).not.toContain("(allow network*)");
+    expect(profile?.split("\n").some((line) => line.startsWith("(allow network"))).toBe(false);
     expect(request?.args.slice(2)).toEqual([fs.realpathSync("/bin/echo"), "fixed;not-shell"]);
     expect(request?.timeoutMs).toBe(1_234);
     expect(request?.maxOutputBytes).toBe(4_321);
@@ -609,32 +609,23 @@ describe("portable autonomy adapters", () => {
     expect(lines).toContain("(deny default)");
   });
 
-  it("allows loopback bind so sandboxed gates can start in-process fake providers", () => {
-    // Regression guard for the sandboxed integration gate failing with
-    // `listen EPERM: operation not permitted 127.0.0.1`: with full network
-    // denied, the fake provider still needs to bind an ephemeral loopback
-    // socket. Loopback bind/listen/connect must be granted while all off-host
-    // traffic stays denied by default.
+  it("keeps all network denied including loopback for non-install gates", () => {
+    // Regression guard: an independent verifier vetoed loopback allows in
+    // network=false profiles. Sandboxed gates that need an in-process fake
+    // provider must skip those cases under ONE_CLI_SANDBOXED=1 instead of
+    // opening a loopback bind, so the profile emits no network allow at all and
+    // the blanket (deny network*) keeps every address — including localhost —
+    // denied by default.
     const profile = buildDarwinSandboxProfile("/tmp/workspace", "/tmp/home", "/bin/echo");
     const lines = profile.split("\n");
-    expect(lines).toContain('(allow network-bind (local ip "localhost:*"))');
-    expect(lines).toContain('(allow network-inbound (local ip "localhost:*"))');
-    expect(lines).toContain('(allow network-outbound (remote ip "localhost:*"))');
-    // Deny-default remains, and the residual blanket network denial still
-    // forbids every non-loopback address.
+    expect(lines).not.toContain('(allow network-bind (local ip "localhost:*"))');
+    expect(lines).not.toContain('(allow network-inbound (local ip "localhost:*"))');
+    expect(lines).not.toContain('(allow network-outbound (remote ip "localhost:*"))');
+    // Deny-default remains, and the residual blanket network denial forbids
+    // every address with no network allow leaking in.
     expect(lines).toContain("(deny default)");
     expect(lines).toContain("(deny network*)");
-    // No unrestricted network grant may leak: every network allow is loopback
-    // scoped, and the (deny network*) line follows all loopback allows so
-    // off-host traffic is still refused.
-    expect(
-      lines.some(
-        (line) => line.startsWith("(allow network") && !line.includes('ip "localhost:*"'),
-      ),
-    ).toBe(false);
-    expect(profile.lastIndexOf("(allow network-bind")).toBeLessThan(
-      profile.indexOf("(deny network*)"),
-    );
+    expect(lines.some((line) => line.startsWith("(allow network"))).toBe(false);
   });
 
   it("terminates the whole process group so sandboxed fork workers are not orphaned", () => {
