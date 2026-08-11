@@ -291,10 +291,21 @@ export class GitManager {
     const branch = checkedRef(options.branch, "Branch");
     const startPoint = checkedRef(options.startPoint, "Start point");
     const worktreePath = this.worktreePath(repository.id, id);
-    if (fs.existsSync(worktreePath)) {
-      throw new Error(`Worktree already exists: ${repository.id}/${id}`);
-    }
     this.assertCanonicalManagedPath(this.worktreesRoot, this.storageRoot);
+    if (fs.existsSync(worktreePath)) {
+      this.assertCanonicalManagedPath(worktreePath, this.worktreesRoot);
+      const listed = await this.git(
+        [`--git-dir=${barePath}`, "worktree", "list", "--porcelain"],
+        undefined,
+        options.signal,
+      );
+      assertProcessSucceeded("git worktree list", listed);
+      if (listed.stdout.split(/\r?\n/u).some((line) => line === `worktree ${worktreePath}`)) {
+        return { id, repositoryId: repository.id, path: worktreePath };
+      }
+      // Orphan directory left after a crash: remove and recreate below.
+      fs.rmSync(worktreePath, { recursive: true, force: true });
+    }
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true, mode: 0o700 });
     this.assertCanonicalManagedPath(path.dirname(worktreePath), this.worktreesRoot);
 

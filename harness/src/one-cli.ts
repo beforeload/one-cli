@@ -154,6 +154,10 @@ export class OneCliClient {
       signal,
       false,
     );
+    if (!result.stdout.trim()) {
+      const detail = result.stderr.trim().split(/\r?\n/u).at(-1) || `exit ${result.exitCode}`;
+      throw new Error(`one-cli once returned no JSON: ${detail.slice(0, 400)}`);
+    }
     const tick = parseTick(parseJson(result.stdout, "once"));
     if (result.exitCode !== 0 && !["blocked", "failed", "in_doubt"].includes(tick.state)) {
       requireSuccess("one-cli autonomy once", result);

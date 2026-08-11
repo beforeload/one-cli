@@ -220,6 +220,55 @@ describe("harness machine recovery", () => {
     expect(fixture.retries).toHaveLength(0);
   });
 
+  it("decomposes a blocked historical roadmap attempt with sandbox kill EPERM", async () => {
+    const fixture = recoveryFixture();
+    const failure = receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stderr: "Failed to terminate forks worker. Error: kill EPERM",
+      fingerprint: "f".repeat(64),
+      hash: "1".repeat(64),
+    });
+    const issue: HostIssue = {
+      number: 7,
+      title: roadmap.children[0]!.title,
+      body: roadmap.children[0]!.seedMarker,
+      labels: ["enhancement", "cold-start-roadmap", "agent-ready", "priority:p1"],
+      state: "open",
+      htmlUrl: "https://example.test/issues/7",
+    };
+    const blocked = status({
+      state: "planning",
+      detail: {},
+    });
+    blocked.attempts = [
+      {
+        id: "attempt-old",
+        issueId: "github-7",
+        state: "blocked",
+        prNumber: null,
+        detail: {
+          gate: "unit",
+          failureReceipt: failure,
+          failureReceipts: [failure],
+        },
+      },
+      blocked.activeAttempt!,
+    ];
+    await expect(fixture.recovery.decomposeBlockedRoadmapEnvironment(
+      blocked,
+      issue,
+      roadmap.children[0]!,
+      6,
+    )).resolves.toMatchObject({
+      action: "environment-blocker",
+      state: "parked",
+    });
+    expect(fixture.github.issues).toHaveLength(1);
+    expect(fixture.github.updatedLabels.get(7)).toContain("priority:p1");
+    expect(fixture.github.updatedLabels.get(7)).not.toContain("agent-ready");
+  });
+
   it("decomposes sandbox kill EPERM into a new agent-ready issue and pauses the roadmap child", async () => {
     const fixture = recoveryFixture();
     const failure = receipt({

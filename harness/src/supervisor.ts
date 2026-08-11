@@ -113,6 +113,14 @@ export class ColdStartSupervisor {
     );
     if (recovery) return recovery;
     if (initialNext) {
+      const decomposed = await this.recovery.decomposeBlockedRoadmapEnvironment(
+        status,
+        initialNext.issue,
+        initialNext.child,
+        invariantParent.number,
+        signal,
+      );
+      if (decomposed) return decomposed;
       const remediation = await this.recovery.remediateExhaustedRoadmapFailure(
         status,
         initialNext.issue,

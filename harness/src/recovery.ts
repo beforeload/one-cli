@@ -214,6 +214,39 @@ export class HarnessRecovery {
     return await this.dependencies.github.listOpenEnvironmentBlockers(signal);
   }
 
+  async decomposeBlockedRoadmapEnvironment(
+    status: AutonomyStatus,
+    issue: HostIssue,
+    child: RoadmapChild,
+    parentNumber: number,
+    signal?: AbortSignal,
+  ): Promise<RecoveryTickResult | undefined> {
+    const issueId = `github-${issue.number}`;
+    const candidates = [...status.attempts]
+      .reverse()
+      .filter((attempt) =>
+        attempt.issueId === issueId &&
+        ["blocked", "waiting", "waiting_evidence", "failed", "verifying"].includes(
+          attempt.state,
+        ));
+    for (const attempt of candidates) {
+      const receipt = newestFailureReceipt(attempt);
+      if (!receipt) continue;
+      const diagnosis = diagnoseFailure(receipt);
+      if (diagnosis.decision !== "decompose-issue") continue;
+      this.appendDiagnosisOnce(attempt, receipt, diagnosis);
+      return await this.decomposeOutOfScopeEnvironmentBlocker(
+        receipt,
+        issue,
+        child,
+        parentNumber,
+        diagnosis,
+        signal,
+      );
+    }
+    return undefined;
+  }
+
   async decomposeOutOfScopeEnvironmentBlocker(
     receipt: FailureReceiptView,
     issue: HostIssue,
