@@ -67,7 +67,12 @@ export class HarnessRecovery {
     },
   ): Promise<RecoveryTickResult | undefined> {
     const attempt = status.activeAttempt;
-    if (!attempt || !["waiting_evidence", "waiting"].includes(attempt.state)) return undefined;
+    if (
+      !attempt ||
+      !["waiting_evidence", "waiting", "verifying", "failed"].includes(attempt.state)
+    ) {
+      return undefined;
+    }
     let receipt = newestFailureReceipt(attempt);
     if (!receipt) {
       if (attempt.state !== "waiting_evidence") return undefined;
@@ -138,6 +143,8 @@ export class HarnessRecovery {
         signal,
       );
     }
+    // Only machine-retry from explicit waiting states; verifying/failed continue via the product tick.
+    if (!["waiting_evidence", "waiting"].includes(attempt.state)) return undefined;
     if (diagnosis.decision === "park" || diagnosis.decision === "quarantine") {
       this.appendDiagnosisOnce(attempt, receipt, diagnosis);
       return this.park(

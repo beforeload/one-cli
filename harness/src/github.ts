@@ -163,9 +163,8 @@ export class GhClient implements GitHubPort {
     );
     const items = record(result, "environment blocker search").items;
     if (!Array.isArray(items)) throw new Error("GitHub environment blocker search is invalid");
-    const total = record(result, "environment blocker search").total_count;
-    if (typeof total !== "number" || !Number.isSafeInteger(total) || total !== items.length) {
-      throw new Error("GitHub environment blocker inventory is truncated or invalid");
+    if (items.length >= 100) {
+      throw new Error("GitHub environment blocker inventory exceeds the strict single-page bound");
     }
     return items
       .filter((item) => !record(item, "search item").pull_request)
