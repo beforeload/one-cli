@@ -98,6 +98,17 @@ export class ColdStartSupervisor {
       : undefined;
     let status = await this.dependencies.oneCli.status("roadmap-only", initialBinding, signal);
     const recoveryScope = initialNext ? "roadmap-only" : "normal";
+    // Out-of-scope sandbox blockers must preempt retries on the current roadmap child.
+    if (initialNext) {
+      const decomposed = await this.recovery.decomposeBlockedRoadmapEnvironment(
+        status,
+        initialNext.issue,
+        initialNext.child,
+        invariantParent.number,
+        signal,
+      );
+      if (decomposed) return decomposed;
+    }
     const recovery = await this.recovery.recoverWaitingAttempt(
       status,
       recoveryScope,
@@ -113,14 +124,6 @@ export class ColdStartSupervisor {
     );
     if (recovery) return recovery;
     if (initialNext) {
-      const decomposed = await this.recovery.decomposeBlockedRoadmapEnvironment(
-        status,
-        initialNext.issue,
-        initialNext.child,
-        invariantParent.number,
-        signal,
-      );
-      if (decomposed) return decomposed;
       const remediation = await this.recovery.remediateExhaustedRoadmapFailure(
         status,
         initialNext.issue,
