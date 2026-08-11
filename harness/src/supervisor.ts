@@ -143,7 +143,8 @@ export class ColdStartSupervisor {
         state: tick.state,
         detail: tick.detail ?? null,
       });
-      return this.tickResult(tick, "normal");
+      // Stay on the roadmap phase: blocker recovery runs before durable handoff.
+      return this.tickResult(tick, "roadmap");
     }
     const initialNext = initialIssues.children.find(({ issue }) => issue.state === "open");
     const initialBinding = initialNext
@@ -580,7 +581,12 @@ export function readRoadmapHandoff(journal: HostJournal): RoadmapHandoff | undef
   const handoffs = events.filter((event) => event.type === "roadmap.handoff.completed");
   if (handoffs.length > 1) throw new Error("Durable roadmap handoff evidence is duplicated");
   if (handoffs.length === 0) {
-    if (events.some(isNormalTickEvent)) {
+    // Environment-blocker recovery may have historically journaled phase=normal ticks
+    // before handoff; those must not require durable handoff evidence.
+    const hasEnvironmentBlockerLane = events.some((event) =>
+      event.type.startsWith("harness.environment-blocker-"),
+    );
+    if (events.some(isNormalTickEvent) && !hasEnvironmentBlockerLane) {
       throw new Error("Durable roadmap handoff evidence is missing after normal execution");
     }
     return undefined;

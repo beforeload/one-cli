@@ -26,7 +26,7 @@ import {
   type SeedOperation,
   type SeedOperationStore,
 } from "../../harness/src/seed-state.js";
-import { ColdStartSupervisor } from "../../harness/src/supervisor.js";
+import { ColdStartSupervisor, readRoadmapHandoff } from "../../harness/src/supervisor.js";
 import { repositoryKey as autonomyRepositoryKey } from "../../src/autonomy/config.js";
 import { makeTempDir, removeTempDir } from "../helpers.js";
 
@@ -41,6 +41,25 @@ describe("cold-start harness", () => {
   it("derives the exact autonomy repository key from tracked identity", () => {
     expect(harnessRepositoryKey("beforeload", "one-cli"))
       .toBe(autonomyRepositoryKey("beforeload", "one-cli"));
+  });
+
+  it("does not require roadmap handoff while environment-blocker recovery is active", () => {
+    const root = makeTempDir("harness-handoff-");
+    roots.push(root);
+    const journal = new HostJournal(path.join(root, "journal.jsonl"));
+    journal.append("harness.environment-blocker-tick", {
+      blockerIssueNumber: 29,
+      action: "global-dogfood",
+      state: "blocked",
+    });
+    journal.append("harness.tick-blocked", {
+      phase: "normal",
+      action: "global-dogfood",
+      state: "blocked",
+      attemptId: null,
+      detail: "integration failed",
+    });
+    expect(readRoadmapHandoff(journal)).toBeUndefined();
   });
 
   it("bounds subprocess output, timeout, and cancellation without a shell", async () => {
