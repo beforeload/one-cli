@@ -67,6 +67,16 @@ describe("harness machine recovery", () => {
       category: "environment/toolchain",
       decision: "decompose-issue",
     });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:build",
+      gate: "build",
+      stdout: "src/autonomy/process.ts(471,28): error TS2379: Argument of type",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted",
+    }))).toMatchObject({
+      category: "code/gate",
+      decision: "retry-implement",
+      target: "implementing",
+    });
     expect(diagnoseFailure(receipt({ operation: "gate:test", gate: "test" })).decision)
       .toBe("retry-implement");
     expect(diagnoseFailure(receipt({ stderr: "protected path requires approval" }), {
