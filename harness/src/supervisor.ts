@@ -156,6 +156,20 @@ export class ColdStartSupervisor {
         state: tick.state,
         detail: tick.detail ?? null,
       });
+      if (tick.state === "waiting_evidence") {
+        const waitingStatus = await this.dependencies.oneCli.status(
+          "normal",
+          undefined,
+          signal,
+        );
+        const waitingRecovery = await this.recovery.recoverWaitingAttempt(
+          waitingStatus,
+          "normal",
+          undefined,
+          signal,
+        );
+        if (waitingRecovery) return waitingRecovery;
+      }
       // Stay on the roadmap phase: blocker recovery runs before durable handoff.
       return this.tickResult(tick, "roadmap");
     }
