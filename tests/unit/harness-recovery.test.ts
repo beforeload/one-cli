@@ -49,6 +49,15 @@ describe("harness machine recovery", () => {
       category: "environment/toolchain",
       decision: "decompose-issue",
     });
+    expect(diagnoseFailure(receipt({
+      operation: "gate:unit",
+      gate: "unit",
+      stdout: "fails closed on protected path requires approval",
+      stderr: "Error opening /private/var/select/sh: Operation not permitted\nkill EPERM",
+    }))).toMatchObject({
+      category: "environment/toolchain",
+      decision: "decompose-issue",
+    });
     expect(diagnoseFailure(receipt({ operation: "gate:test", gate: "test" })).decision)
       .toBe("retry-implement");
     expect(diagnoseFailure(receipt({ stderr: "protected path requires approval" }), {

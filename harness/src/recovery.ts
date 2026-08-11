@@ -230,19 +230,19 @@ export class HarnessRecovery {
           attempt.state,
         ));
     for (const attempt of candidates) {
-      const receipt = newestFailureReceipt(attempt);
-      if (!receipt) continue;
-      const diagnosis = diagnoseFailure(receipt);
-      if (diagnosis.decision !== "decompose-issue") continue;
-      this.appendDiagnosisOnce(attempt, receipt, diagnosis);
-      return await this.decomposeOutOfScopeEnvironmentBlocker(
-        receipt,
-        issue,
-        child,
-        parentNumber,
-        diagnosis,
-        signal,
-      );
+      for (const receipt of [...failureReceipts(attempt)].reverse()) {
+        const diagnosis = diagnoseFailure(receipt);
+        if (diagnosis.decision !== "decompose-issue") continue;
+        this.appendDiagnosisOnce(attempt, receipt, diagnosis);
+        return await this.decomposeOutOfScopeEnvironmentBlocker(
+          receipt,
+          issue,
+          child,
+          parentNumber,
+          diagnosis,
+          signal,
+        );
+      }
     }
     return undefined;
   }
@@ -444,17 +444,25 @@ export class HarnessRecovery {
 }
 
 export function newestFailureReceipt(attempt: AttemptStatus): FailureReceiptView | undefined {
+  return failureReceipts(attempt).at(-1);
+}
+
+export function failureReceipts(attempt: AttemptStatus): FailureReceiptView[] {
   const detail = attempt.detail;
-  if (!detail) return undefined;
+  if (!detail) return [];
   const candidates: unknown[] = [];
   if (Array.isArray(detail.failureReceipts)) candidates.push(...detail.failureReceipts);
+  if (detail.failureReceipt !== undefined) candidates.push(detail.failureReceipt);
   const lastFailure = object(detail.lastFailure);
   if (lastFailure.receipt !== undefined) candidates.push(lastFailure.receipt);
-  return candidates
+  const unique = new Map<string, FailureReceiptView>();
+  for (const receipt of candidates
     .map(parseReceipt)
-    .filter((receipt): receipt is FailureReceiptView => receipt !== undefined)
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .at(-1);
+    .filter((value): value is FailureReceiptView => value !== undefined)
+    .sort((left, right) => left.timestamp - right.timestamp)) {
+    unique.set(receipt.hash, receipt);
+  }
+  return [...unique.values()];
 }
 
 export function createMachineEvidence(

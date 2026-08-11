@@ -61,20 +61,21 @@ export function diagnoseFailure(
     receipt.spawnError ?? "",
   ].join("\n");
   let result: Omit<DeterministicDiagnosis, "schema" | "modelAdvice">;
-  if (POLICY.test(text)) {
-    result = {
-      category: "policy/governance",
-      decision: "park",
-      backoffMs: 0,
-      reason: "Deterministic policy or governance boundary matched the failure receipt",
-    };
-  } else if (SANDBOX_DECOMPOSE.test(text)) {
+  // Sandbox/process-signal signatures win over policy text that may appear in unit stdout.
+  if (SANDBOX_DECOMPOSE.test(text)) {
     result = {
       category: "environment/toolchain",
       decision: "decompose-issue",
       backoffMs: 0,
       reason:
         "Sandbox or process-signal failure is outside the current issue approved paths and must become a new agent-ready issue",
+    };
+  } else if (POLICY.test(text)) {
+    result = {
+      category: "policy/governance",
+      decision: "park",
+      backoffMs: 0,
+      reason: "Deterministic policy or governance boundary matched the failure receipt",
     };
   } else if (
     receipt.timedOut ||
