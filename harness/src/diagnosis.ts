@@ -43,7 +43,7 @@ export interface DeterministicDiagnosis {
 const POLICY =
   /\b(?:approval|required approval|governance|policy|protected path|outside (?:the )?approved|roadmap binding|permission denied|unauthori[sz]ed|forbidden|self-approv|credential|secret)\b/iu;
 const TRANSIENT =
-  /\b(?:econnreset|econnrefused|enetunreach|eai_again|dns|network|socket hang up|timed? ?out|timeout|temporary|temporarily|rate limit|too many requests|http 429|http 5\d\d|provider unavailable|service unavailable)\b/iu;
+  /\b(?:econnreset|econnrefused|enetunreach|eai_again|dns|network|socket hang up|timed? ?out|timeout|temporary|temporarily|rate limit|too many requests|http 429|http 5\d\d|provider_error|provider unavailable|service unavailable)\b/iu;
 const ENVIRONMENT =
   /\b(?:command not found|enoent|not installed|missing executable|cannot find module|module not found|unsupported platform|toolchain|sandbox unavailable|no such file or directory|exit handler never called|error with npm itself|error writing to the directory)\b/iu;
 const SANDBOX_DECOMPOSE =

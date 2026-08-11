@@ -31,6 +31,15 @@ describe("harness machine recovery", () => {
   it("uses deterministic categories and never lets model advice choose policy", () => {
     expect(diagnoseFailure(receipt({ stderr: "ECONNRESET from provider" })).category)
       .toBe("transient/network/provider");
+    expect(diagnoseFailure(receipt({
+      operation: "worker",
+      source: "worker",
+      stderr: "provider_error",
+    }))).toMatchObject({
+      category: "transient/network/provider",
+      decision: "retry-same-state",
+      target: "same-state",
+    });
     expect(diagnoseFailure(receipt({ spawnError: "ENOENT", exitCode: 127 })).category)
       .toBe("environment/toolchain");
     expect(diagnoseFailure(receipt({

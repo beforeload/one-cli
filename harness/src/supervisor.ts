@@ -13,6 +13,13 @@ import { seedRoadmap } from "./seed.js";
 import type { SeedOperationStore } from "./seed-state.js";
 
 const FAIL_CLOSED_STATES = new Set(["in_doubt", "blocked"]);
+const ENVIRONMENT_BLOCKER_DRAIN_ACTIONS = new Set([
+  "global-dogfood",
+  "community-scan",
+  "community-scan-pending",
+  "user-promotion",
+  "gap-promotion",
+]);
 const SHA = /^[0-9a-f]{40,64}$/u;
 
 export interface RoadmapHandoff {
@@ -104,7 +111,32 @@ export class ColdStartSupervisor {
           signal,
         );
       }
-      const tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      // Recover a waiting blocker attempt before spending another selection tick.
+      const blockerStatus = await this.dependencies.oneCli.status("normal", undefined, signal);
+      const blockerRecovery = await this.recovery.recoverWaitingAttempt(
+        blockerStatus,
+        "normal",
+        undefined,
+        signal,
+      );
+      if (blockerRecovery) return blockerRecovery;
+      // Drain due maintenance so the open environment blocker can be selected
+      // without waiting for the next harness interval.
+      let tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      for (
+        let drained = 0;
+        ENVIRONMENT_BLOCKER_DRAIN_ACTIONS.has(tick.action) && drained < 3;
+        drained++
+      ) {
+        this.dependencies.journal.append("harness.environment-blocker-drained", {
+          blockerIssueNumber: blocker.number,
+          action: tick.action,
+          state: tick.state,
+          detail: tick.detail ?? null,
+          drained: drained + 1,
+        });
+        tick = await this.dependencies.oneCli.once("normal", undefined, signal);
+      }
       this.dependencies.journal.append("harness.environment-blocker-tick", {
         blockerIssueNumber: blocker.number,
         action: tick.action,
