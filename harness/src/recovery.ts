@@ -225,14 +225,17 @@ export class HarnessRecovery {
   ): Promise<readonly TickOutputLike[]> {
     const issueId = `github-${issue.number}`;
     const expected = { issueNumber: issue.number, seedMarker: child.seedMarker };
+    const terminal = new Set(["succeeded", "failed", "cancelled", "delivered"]);
+    const candidates = status.attempts.filter(
+      (attempt) => attempt.issueId === issueId && !terminal.has(attempt.state),
+    );
+    // Cancel the lease-holding active attempt first so older attempts can acquire recovery leases.
+    const ordered = [
+      ...candidates.filter((attempt) => attempt.id === status.activeAttempt?.id),
+      ...candidates.filter((attempt) => attempt.id !== status.activeAttempt?.id),
+    ];
     const results: TickOutputLike[] = [];
-    for (const attempt of status.attempts) {
-      if (
-        attempt.issueId !== issueId ||
-        ["succeeded", "failed", "cancelled", "delivered"].includes(attempt.state)
-      ) {
-        continue;
-      }
+    for (const attempt of ordered) {
       const tick = await this.dependencies.oneCli.cancel(
         attempt.id,
         "roadmap-only",
