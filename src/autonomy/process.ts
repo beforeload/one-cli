@@ -468,15 +468,7 @@ export class SpawnProcessRunner implements ProcessRunner {
       };
 
       const kill = (signal: NodeJS.Signals): void => {
-        try {
-          if (child.pid !== undefined && process.platform !== "win32") {
-            process.kill(-child.pid, signal);
-          } else {
-            child.kill(signal);
-          }
-        } catch {
-          // The process may have exited between the state check and the signal.
-        }
+        signalProcessGroup(child, signal);
       };
 
       const terminate = (): void => {
@@ -540,6 +532,59 @@ export class SpawnProcessRunner implements ProcessRunner {
       else child.stdin.end();
     });
   }
+}
+
+/**
+ * Signals a spawned child and, on POSIX platforms, its whole process group so
+ * that grandchildren (for example sandboxed Node fork/vitest workers) are not
+ * orphaned. Under the DarwinSandbox the profile grants signaling of the
+ * process's own process group (target pgrp), so the group signal reaches the
+ * whole fork-worker tree cleanly. When the process-group signal is still
+ * rejected — for example with EPERM inside a stricter sandbox that only grants
+ * signaling of the direct child — it falls back to signaling the child process
+ * directly. ESRCH is ignored because the process may have already exited
+ * between the state check and the signal.
+ */
+export function signalProcessGroup(
+  child: { readonly pid?: number | undefined; kill(signal: NodeJS.Signals): boolean },
+  signal: NodeJS.Signals,
+  killer: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => {
+    process.kill(pid, sig);
+  },
+): void {
+  const pid = child.pid;
+  if (pid === undefined || process.platform === "win32") {
+    try {
+      child.kill(signal);
+    } catch {
+      // The process may have already exited; nothing else to clean up.
+    }
+    return;
+  }
+  let groupSignalled = false;
+  try {
+    killer(-pid, signal);
+    groupSignalled = true;
+  } catch (error) {
+    // ESRCH means the group is already gone; any other rejection (notably
+    // EPERM under a sandbox policy) means fall back to the direct child so
+    // workers are not orphaned.
+    if (isNoSuchProcess(error)) return;
+  }
+  if (groupSignalled) return;
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may have exited; there is nothing further to terminate.
+  }
+}
+
+function isNoSuchProcess(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "ESRCH"
+  );
 }
 
 export function assertProcessSucceeded(operation: string, result: ProcessResult): void {

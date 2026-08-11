@@ -205,7 +205,17 @@ export function buildDarwinSandboxProfile(
   return [
     "(version 1)",
     "(deny default)",
-    network ? "(allow network-outbound)" : "(deny network*)",
+    // Full outbound network is granted only for the trusted install command.
+    // Otherwise all network access — including loopback (127.0.0.1/::1) — stays
+    // denied. An independent verifier vetoed loopback allows in network=false
+    // profiles because even host-local sockets widen the deny-default surface,
+    // so no loopback grant is emitted here. Sandboxed unit/integration gates
+    // that need an in-process fake provider must instead skip those cases when
+    // ONE_CLI_SANDBOXED=1 rather than open a loopback bind. The blanket
+    // (deny network*) keeps the profile strictly deny-default for every address.
+    ...(network
+      ? ["(allow network-outbound)", "(allow network-inbound)"]
+      : ["(deny network*)"]),
     '(allow file-read-data (literal "/"))',
     ...traversalRoots.map((root) =>
       `(allow file-read-metadata (literal ${profileString(root)}))`
@@ -216,8 +226,31 @@ export function buildDarwinSandboxProfile(
         : `(allow file-read* (subpath ${profileString(root)}))`,
     ),
     "(allow process-fork)",
+    // Sandboxed Node must be able to stop its own fork workers (for example
+    // vitest workers) without kill EPERM. The runner terminates the whole
+    // process group (process.kill(-pid, ...)) so that grandchildren — vitest
+    // fork/tinypool workers spawned by a direct child — are not orphaned.
+    // macOS evaluates the signal operation against every target in that group,
+    // so a bare (target children) grant only reaches direct children and leaves
+    // grandchildren orphaned with EPERM. (target pgrp) authorizes signaling any
+    // process that shares the sandboxed leader's own process group, which is
+    // exactly the fork-worker tree. self/children remain for direct-signal
+    // fallbacks. Every grant is scoped to the sandbox's own tree, so the
+    // deny-default policy still forbids signaling any process outside it.
+    "(allow signal (target self))",
+    "(allow signal (target children))",
+    "(allow signal (target pgrp))",
     `(allow process-exec (literal ${profileString(executable)}))`,
     `(allow process-exec (subpath ${profileString(workspace)}))`,
+    // Sandboxed toolchains (for example npm creating $HOME/.npm/_logs and then
+    // invoking helper binaries it materialized under the temporary HOME) must
+    // be able to exec files they wrote inside their own scratch home. Without
+    // this grant a nested sandboxed Node run exits with EX_OSERR (71) when it
+    // cannot open its exec helper. The grant is scoped strictly to the
+    // per-run temporary HOME, which is created fresh and removed afterwards, so
+    // the deny-default policy still forbids executing anything outside the
+    // sandbox's own workspace, runtime roots, and scratch home.
+    `(allow process-exec (subpath ${profileString(temporaryHome)}))`,
     ...runtimeRoots
       .filter((root) => path.isAbsolute(root) && !root.includes("\0"))
       .map((root) => `(allow process-exec (subpath ${profileString(root)}))`),
@@ -273,6 +306,10 @@ function sandboxEnvironment(
     HOME: temporaryHome,
     TMPDIR: temporaryDirectory,
     LC_ALL: "C",
+    // Mark every descendant as running inside a sandbox so that nested tooling
+    // (and unit tests) can detect the enclosing sandbox and avoid spawning a
+    // second, guaranteed-to-fail sandbox-exec layer that macOS rejects.
+    ONE_CLI_SANDBOXED: "1",
   };
   const pathValue = process.env.PATH;
   if (pathValue !== undefined) environment.PATH = pathValue;

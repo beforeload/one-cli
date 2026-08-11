@@ -17,6 +17,7 @@ import type {
   ProcessResult,
   ProcessRunner,
 } from "../../src/autonomy/process.js";
+import { signalProcessGroup } from "../../src/autonomy/process.js";
 import {
   DarwinSandbox,
   buildDarwinSandboxProfile,
@@ -394,7 +395,16 @@ describe("portable autonomy adapters", () => {
     );
     expect(profile).toContain(`(subpath ${JSON.stringify(fs.realpathSync(workspace))})`);
     expect(profile).not.toContain("(allow file-read*)");
-    expect(profile).not.toContain("(allow network");
+    // No loopback network grant may be present: an independent verifier vetoed
+    // loopback allows in network=false profiles, so the profile stays strictly
+    // deny-default for every address including localhost.
+    expect(profile).not.toContain('(allow network-bind (local ip "localhost:*"))');
+    expect(profile).not.toContain('(allow network-inbound (local ip "localhost:*"))');
+    expect(profile).not.toContain('(allow network-outbound (remote ip "localhost:*"))');
+    expect(profile?.split("\n")).not.toContain("(allow network-outbound)");
+    expect(profile?.split("\n")).not.toContain("(allow network-inbound)");
+    expect(profile?.split("\n")).not.toContain("(allow network*)");
+    expect(profile?.split("\n").some((line) => line.startsWith("(allow network"))).toBe(false);
     expect(request?.args.slice(2)).toEqual([fs.realpathSync("/bin/echo"), "fixed;not-shell"]);
     expect(request?.timeoutMs).toBe(1_234);
     expect(request?.maxOutputBytes).toBe(4_321);
@@ -405,7 +415,17 @@ describe("portable autonomy adapters", () => {
   });
 
   it("allows Node to traverse only runtime path ancestors on Darwin", async () => {
-    if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) return;
+    // A live sandbox-exec run cannot be nested: when the unit gate itself runs
+    // under the DarwinSandbox (signalled by ONE_CLI_SANDBOXED=1), starting a
+    // second sandbox-exec layer is rejected by macOS and would fail closed.
+    // Skip the live exec here while still exercising the profile shape below.
+    if (
+      process.platform !== "darwin" ||
+      process.env.ONE_CLI_SANDBOXED === "1" ||
+      !fs.existsSync("/usr/bin/sandbox-exec")
+    ) {
+      return;
+    }
     const workspace = path.join(root, "node-runtime-workspace");
     fs.mkdirSync(workspace);
     const sandbox = new DarwinSandbox({
@@ -497,7 +517,245 @@ describe("portable autonomy adapters", () => {
     expect(profile).toContain(
       `(subpath ${JSON.stringify('/tmp/workspace") (allow network*) ("')})`,
     );
-    expect(profile.split("\n").some((line) => line.startsWith("(allow network"))).toBe(false);
+    // The injected `(allow network*)` must not escape the escaped string into a
+    // real profile line. Scoped loopback grants are expected, but no
+    // unrestricted network grant may appear on its own line.
+    const escapeLines = profile.split("\n");
+    expect(escapeLines).not.toContain("(allow network*)");
+    expect(escapeLines).not.toContain("(allow network-outbound)");
+    expect(escapeLines).not.toContain("(allow network-inbound)");
+    expect(
+      escapeLines.some(
+        (line) => line.startsWith("(allow network") && !line.includes('ip "localhost:*"'),
+      ),
+    ).toBe(false);
+  });
+
+  it("allows sandboxed tooling to exec helpers only inside its own scratch home", () => {
+    const profile = buildDarwinSandboxProfile("/tmp/workspace", "/tmp/home", "/bin/echo");
+    const lines = profile.split("\n");
+    // Nested sandboxed Node (for example npm materializing and running a helper
+    // under $HOME/.npm) must be able to exec files it wrote to the temporary
+    // HOME; otherwise it exits with EX_OSERR (71). The grant is scoped strictly
+    // to the per-run scratch home so deny-default still blocks the rest of disk.
+    expect(lines).toContain('(allow process-exec (subpath "/tmp/home"))');
+    // The workspace and the fixed executable remain exec-allowed as before.
+    expect(lines).toContain('(allow process-exec (subpath "/tmp/workspace"))');
+    expect(lines).toContain('(allow process-exec (literal "/bin/echo"))');
+    // No process-exec grant may leak outside the sandbox's own scoped roots.
+    expect(
+      lines.some(
+        (line) => line.startsWith("(allow process-exec") && !line.includes("(literal ") && !line.includes("(subpath "),
+      ),
+    ).toBe(false);
+    expect(lines).toContain("(deny default)");
+  });
+
+  it("marks sandboxed descendants so nested sandbox-exec layers are avoided", async () => {
+    const workspace = path.join(root, "sandboxed-marker-workspace");
+    fs.mkdirSync(workspace);
+    const runner = new FakeProcessRunner();
+    const sandbox = new DarwinSandbox({
+      workspace,
+      commands: { echo: { executable: "/bin/echo", args: ["safe"] } },
+      runner,
+      platform: "darwin",
+      isExecutable: () => true,
+    });
+
+    await sandbox.run("echo");
+
+    expect(runner.requests[0]?.env?.ONE_CLI_SANDBOXED).toBe("1");
+  });
+
+  it("grants sandboxed processes signal rights over only their own descendants", () => {
+    const profile = buildDarwinSandboxProfile("/tmp/workspace", "/tmp/home", "/bin/echo");
+    const lines = profile.split("\n");
+    expect(lines).toContain("(allow signal (target self))");
+    expect(lines).toContain("(allow signal (target children))");
+    // Process-group termination must reach grandchildren (vitest fork/tinypool
+    // workers), which share the sandboxed leader's process group but are not
+    // direct children; (target pgrp) authorizes exactly that tree.
+    expect(lines).toContain("(allow signal (target pgrp))");
+    // Deny-default must remain and no unscoped signal grant may leak in.
+    expect(lines).toContain("(deny default)");
+    expect(lines.some((line) => line.startsWith("(allow signal") && !line.includes("target"))).toBe(
+      false,
+    );
+    // No signal grant may target processes outside the sandbox's own tree.
+    expect(
+      lines.some(
+        (line) =>
+          line.startsWith("(allow signal") &&
+          (line.includes("target others") || line.includes("target all")),
+      ),
+    ).toBe(false);
+    // The signal grants are emitted alongside the process controls, after fork.
+    expect(profile.indexOf("(allow process-fork)")).toBeLessThan(
+      profile.indexOf("(allow signal (target self))"),
+    );
+    expect(profile.indexOf("(allow signal (target self))")).toBeLessThan(
+      profile.indexOf("(allow signal (target pgrp))"),
+    );
+  });
+
+  it("keeps the sandbox signal grant present for network-enabled install gates", () => {
+    const profile = buildDarwinSandboxProfile("/tmp/workspace", "/tmp/home", "/bin/echo", true);
+    const lines = profile.split("\n");
+    expect(lines).toContain("(allow signal (target children))");
+    expect(lines).toContain("(allow signal (target pgrp))");
+    expect(lines).toContain("(allow network-outbound)");
+    expect(lines).toContain("(allow network-inbound)");
+    expect(lines).toContain("(deny default)");
+  });
+
+  it("keeps all network denied including loopback for non-install gates", () => {
+    // Regression guard: an independent verifier vetoed loopback allows in
+    // network=false profiles. Sandboxed gates that need an in-process fake
+    // provider must skip those cases under ONE_CLI_SANDBOXED=1 instead of
+    // opening a loopback bind, so the profile emits no network allow at all and
+    // the blanket (deny network*) keeps every address — including localhost —
+    // denied by default.
+    const profile = buildDarwinSandboxProfile("/tmp/workspace", "/tmp/home", "/bin/echo");
+    const lines = profile.split("\n");
+    expect(lines).not.toContain('(allow network-bind (local ip "localhost:*"))');
+    expect(lines).not.toContain('(allow network-inbound (local ip "localhost:*"))');
+    expect(lines).not.toContain('(allow network-outbound (remote ip "localhost:*"))');
+    // Deny-default remains, and the residual blanket network denial forbids
+    // every address with no network allow leaking in.
+    expect(lines).toContain("(deny default)");
+    expect(lines).toContain("(deny network*)");
+    expect(lines.some((line) => line.startsWith("(allow network"))).toBe(false);
+  });
+
+  it("terminates the whole process group so sandboxed fork workers are not orphaned", () => {
+    const targets: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let directKills = 0;
+    const child = {
+      pid: 4242,
+      kill: (): boolean => {
+        directKills += 1;
+        return true;
+      },
+    };
+
+    signalProcessGroup(child as never, "SIGTERM", (pid, signal) => {
+      targets.push({ pid, signal });
+    });
+
+    if (process.platform === "win32") {
+      expect(targets).toEqual([]);
+    } else {
+      // A successful process-group signal reaches every descendant sharing the
+      // group (including grandchild vitest workers) and must not fall back to a
+      // direct child-only kill that would leave grandchildren orphaned.
+      expect(targets).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+      expect(directKills).toBe(0);
+    }
+  });
+
+  it("falls back to the direct child when the process-group signal is denied (EPERM)", () => {
+    if (process.platform === "win32") return;
+    const groupCalls: number[] = [];
+    let directKills = 0;
+    const child = {
+      pid: 5150,
+      kill: (): boolean => {
+        directKills += 1;
+        return true;
+      },
+    };
+
+    signalProcessGroup(child as never, "SIGKILL", (pid) => {
+      groupCalls.push(pid);
+      const error = new Error("kill EPERM") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    });
+
+    expect(groupCalls).toEqual([-5150]);
+    expect(directKills).toBe(1);
+  });
+
+  it("stops retrying when the process group has already exited (ESRCH)", () => {
+    if (process.platform === "win32") return;
+    let directKills = 0;
+    const child = {
+      pid: 6060,
+      kill: (): boolean => {
+        directKills += 1;
+        return true;
+      },
+    };
+
+    signalProcessGroup(child as never, "SIGTERM", () => {
+      const error = new Error("kill ESRCH") as NodeJS.ErrnoException;
+      error.code = "ESRCH";
+      throw error;
+    });
+
+    expect(directKills).toBe(0);
+  });
+
+  it("signals the child directly when no pid is available", () => {
+    let directSignal: NodeJS.Signals | undefined;
+    const child = {
+      pid: undefined,
+      kill: (signal: NodeJS.Signals): boolean => {
+        directSignal = signal;
+        return true;
+      },
+    };
+
+    signalProcessGroup(child as never, "SIGTERM", () => {
+      throw new Error("must not signal a group without a pid");
+    });
+
+    expect(directSignal).toBe("SIGTERM");
+  });
+
+  it("accepts a spawn-shaped child whose pid may be undefined without a cast", () => {
+    // Regression guard for TS2379 under exactOptionalPropertyTypes: a spawned
+    // ChildProcess exposes `pid?: number | undefined`, so signalProcessGroup's
+    // parameter must accept an optional pid that explicitly allows undefined.
+    // This object is typed exactly like that contract and is passed with no
+    // `as never` cast, so a narrower `pid?: number` signature would fail to
+    // compile the unit gate.
+    const child: { readonly pid?: number | undefined; kill(signal: NodeJS.Signals): boolean } = {
+      pid: 7070,
+      kill: (): boolean => true,
+    };
+    const groupTargets: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+
+    signalProcessGroup(child, "SIGTERM", (pid, signal) => {
+      groupTargets.push({ pid, signal });
+    });
+
+    if (process.platform === "win32") {
+      expect(groupTargets).toEqual([]);
+    } else {
+      expect(groupTargets).toEqual([{ pid: -7070, signal: "SIGTERM" }]);
+    }
+  });
+
+  it("signals a spawn-shaped child directly when its pid resolves to undefined", () => {
+    // The same spawn contract also permits pid === undefined (for example when
+    // the spawn failed). The whole-group path must be skipped and the direct
+    // child signalled, again with no cast so the type contract is exercised.
+    const directSignals: NodeJS.Signals[] = [];
+    const child: { readonly pid?: number | undefined; kill(signal: NodeJS.Signals): boolean } = {
+      pid: undefined,
+      kill: (signal: NodeJS.Signals): boolean => {
+        directSignals.push(signal);
+        return true;
+      },
+    };
+
+    signalProcessGroup(child, "SIGKILL", () => {
+      throw new Error("must not signal a group when pid is undefined");
+    });
+
+    expect(directSignals).toEqual(["SIGKILL"]);
   });
 });
 

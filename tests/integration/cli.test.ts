@@ -21,6 +21,15 @@ describe("built CLI", () => {
   let workspace: string;
   let home: string;
 
+  // The sandboxed unit/install gates run under the DarwinSandbox with a
+  // strictly deny-default profile that no longer grants loopback network
+  // access (an independent verifier vetoed loopback allows in network=false
+  // profiles). Every case below drives the CLI against an in-process fake
+  // provider bound to 127.0.0.1, which a sandboxed process cannot reach, so
+  // these cases are skipped when ONE_CLI_SANDBOXED=1 rather than opening a
+  // loopback grant. They still run unsandboxed in normal CI.
+  const runOrSkip = process.env.ONE_CLI_SANDBOXED === "1" ? it.skip : it;
+
   beforeEach(() => {
     root = makeTempDir("cli");
     workspace = path.join(root, "workspace");
@@ -30,7 +39,7 @@ describe("built CLI", () => {
 
   afterEach(() => removeTempDir(root));
 
-  it("emits a pure JSONL lifecycle for a final answer", async () => {
+  runOrSkip("emits a pure JSONL lifecycle for a final answer", async () => {
     const fake = await startFakeProvider([{ type: "text", content: "hello" }]);
     try {
       const run = await runCli(["run", "-p", "say hello", "--output", "jsonl"], {
@@ -57,7 +66,7 @@ describe("built CLI", () => {
     }
   });
 
-  it("retries a transient provider failure before any output", async () => {
+  runOrSkip("retries a transient provider failure before any output", async () => {
     const fake = await startFakeProvider([
       { type: "error", status: 503, code: "service_unavailable" },
       { type: "text", content: "recovered" },
@@ -82,7 +91,7 @@ describe("built CLI", () => {
     }
   });
 
-  it("preserves partial text and does not retry after output", async () => {
+  runOrSkip("preserves partial text and does not retry after output", async () => {
     const fake = await startFakeProvider([
       { type: "partial_error", content: "partial answer" },
       { type: "text", content: "must not be requested" },
@@ -112,7 +121,7 @@ describe("built CLI", () => {
     }
   });
 
-  it("executes a read tool and returns the result to the provider", async () => {
+  runOrSkip("executes a read tool and returns the result to the provider", async () => {
     fs.writeFileSync(path.join(workspace, "README.md"), "integration evidence");
     const fake = await startFakeProvider([
       {
@@ -144,7 +153,7 @@ describe("built CLI", () => {
     }
   });
 
-  it("denies non-TTY writes by default and permits explicit all mode", async () => {
+  runOrSkip("denies non-TTY writes by default and permits explicit all mode", async () => {
     const deniedProvider = await startFakeProvider([
       {
         type: "tool",
@@ -196,7 +205,7 @@ describe("built CLI", () => {
     }
   });
 
-  it("resumes prior messages only in the same workspace", async () => {
+  runOrSkip("resumes prior messages only in the same workspace", async () => {
     const fake = await startFakeProvider([
       { type: "text", content: "first answer" },
       { type: "text", content: "second answer" },
