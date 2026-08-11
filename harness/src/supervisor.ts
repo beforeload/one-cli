@@ -119,7 +119,20 @@ export class ColdStartSupervisor {
         undefined,
         signal,
       );
-      if (blockerRecovery) return blockerRecovery;
+      if (
+        blockerRecovery &&
+        ["parked", "blocked", "quarantined"].includes(blockerRecovery.state)
+      ) {
+        return blockerRecovery;
+      }
+      if (blockerRecovery) {
+        this.dependencies.journal.append("harness.environment-blocker-recovered", {
+          blockerIssueNumber: blocker.number,
+          action: blockerRecovery.action,
+          state: blockerRecovery.state,
+          detail: blockerRecovery.detail,
+        });
+      }
       // Drain due maintenance so the open environment blocker can be selected
       // without waiting for the next harness interval.
       let tick = await this.dependencies.oneCli.once("normal", undefined, signal);
