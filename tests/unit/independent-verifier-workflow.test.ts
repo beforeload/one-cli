@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const workflow = fs.readFileSync(path.join(ROOT, ".github/workflows/autonomy-tick.yml"), "utf8");
 const verify = fs.readFileSync(path.join(ROOT, ".github/workflows/verify.yml"), "utf8");
+const driver = fs.readFileSync(path.join(ROOT, "scripts/github-autonomy.mjs"), "utf8");
 
 describe("GitHub-hosted unattended workflow", () => {
   it("keeps model execution separate from publication", () => {
@@ -24,7 +25,8 @@ describe("GitHub-hosted unattended workflow", () => {
 
   it("binds artifacts and runs the complete repository gate", () => {
     expect(workflow).toContain("git apply --check");
-    expect(workflow).toContain("patchSha256");
+    expect(driver).toContain("patchSha256");
+    expect(driver).toContain("git apply");
     expect(workflow).toContain("npm run check");
     expect(workflow).toContain("gh pr merge");
   });
