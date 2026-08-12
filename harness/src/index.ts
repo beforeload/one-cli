@@ -47,6 +47,8 @@ import {
   WorkerReleaseReadiness,
   type WorkerPolicyReadinessPort,
 } from "./worker-policy.js";
+import { ServiceCircuit, isTransientInfrastructureMessage } from "./circuit.js";
+import { recoveryStatusSnapshot, runtimeHealthSnapshot } from "./recovery.js";
 
 const COMMANDS = new Set([
   "doctor",
@@ -415,6 +417,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           schema: "one-cli.harness/status-v1",
           phase: normalReady ? "normal" : "roadmap",
           activeAttempt: autonomy.activeAttempt,
+          recovery: recoveryStatusSnapshot(autonomy.activeAttempt, journal),
+          runtime: runtimeHealthSnapshot(journal),
           action: autonomy.action,
           roadmap: {
             total: roadmap.children.length,
@@ -433,9 +437,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           governance: readiness,
           journal: journal.read(20),
         });
+        // waiting_evidence is recoverable by the durable loop; only hard
+        // blocked/in_doubt fail the status process for operators.
         return !verifier.ready ||
             !readiness.ready ||
-            blockedAutonomy(autonomy.activeAttempt?.state)
+            hardBlockedAutonomy(autonomy.activeAttempt?.state)
           ? 1
           : 0;
       }
@@ -476,19 +482,62 @@ export function automaticLanes(
   verifier: { tick(signal?: AbortSignal): Promise<VerifierLaneResult> },
   journal: HostJournal,
 ): { tick(signal?: AbortSignal): Promise<RuntimeTickResult> } {
+  const githubCircuit = new ServiceCircuit();
+  const providerCircuit = new ServiceCircuit();
+  const noteCircuit = (
+    service: "github" | "provider",
+    circuit: ServiceCircuit,
+    detail: string,
+  ): void => {
+    const snapshot = circuit.snapshot();
+    journal.append("harness.circuit", {
+      service,
+      open: snapshot.open,
+      failures: snapshot.failures,
+      openUntil: snapshot.openUntil,
+      detail,
+    });
+  };
   return {
     async tick(signal?: AbortSignal): Promise<RuntimeTickResult> {
+      const open = ([
+        ["github", githubCircuit] as const,
+        ["provider", providerCircuit] as const,
+      ]).find(([, circuit]) => circuit.isOpen());
+      if (open) {
+        const [service, circuit] = open;
+        const nextAttemptAt = circuit.nextAttemptAt();
+        noteCircuit(service, circuit, "Infrastructure circuit is open");
+        return {
+          action: "circuit-open",
+          state: "parked",
+          phase: "normal",
+          detail: "Infrastructure circuit is open; parking until the backoff window elapses",
+          ...(nextAttemptAt === undefined ? {} : { nextAttemptAt }),
+        };
+      }
       let readiness: GovernanceReadiness;
       try {
         readiness = await governance.inspect(signal);
+        const githubBefore = githubCircuit.snapshot();
+        githubCircuit.recordSuccess();
+        if (githubBefore.failures > 0 || githubBefore.open) {
+          noteCircuit("github", githubCircuit, "GitHub circuit closed after success");
+        }
       } catch (error) {
         const detail = message(error);
         journal.append("harness.governance-readiness-failed", { detail });
+        if (isTransientInfrastructureMessage(detail)) {
+          githubCircuit.recordFailure();
+          noteCircuit("github", githubCircuit, detail);
+        }
+        const nextAttemptAt = githubCircuit.nextAttemptAt();
         return {
           action: "governance-readiness",
           state: "blocked",
           phase: "normal",
           detail,
+          ...(nextAttemptAt === undefined ? {} : { nextAttemptAt }),
         };
       }
       journal.append("harness.governance-readiness", {
@@ -507,15 +556,31 @@ export function automaticLanes(
       let runtime: RuntimeTickResult;
       try {
         runtime = await product.tick(signal);
+        if (runtime.state === "blocked" && isTransientInfrastructureMessage(runtime.detail)) {
+          providerCircuit.recordFailure();
+          noteCircuit("provider", providerCircuit, runtime.detail);
+        } else if (!["blocked", "parked", "quarantined"].includes(runtime.state)) {
+          const providerBefore = providerCircuit.snapshot();
+          providerCircuit.recordSuccess();
+          if (providerBefore.failures > 0 || providerBefore.open) {
+            noteCircuit("provider", providerCircuit, "Provider circuit closed after success");
+          }
+        }
       } catch (error) {
         if (error instanceof HostStateCorruptionError) throw error;
         const detail = message(error);
         journal.append("harness.product-lane-failed", { detail });
+        if (isTransientInfrastructureMessage(detail)) {
+          providerCircuit.recordFailure();
+          noteCircuit("provider", providerCircuit, detail);
+        }
+        const nextAttemptAt = providerCircuit.nextAttemptAt();
         runtime = {
           action: "product-lane-failure",
           state: "blocked",
           phase: "normal",
           detail,
+          ...(nextAttemptAt === undefined ? {} : { nextAttemptAt }),
         };
       }
       let verification: VerifierLaneResult;
@@ -862,8 +927,8 @@ function required(argv: readonly string[], index: number, flag: string): string 
   return value;
 }
 
-function blockedAutonomy(state: string | undefined): boolean {
-  return state !== undefined && ["in_doubt", "blocked", "waiting_evidence"].includes(state);
+function hardBlockedAutonomy(state: string | undefined): boolean {
+  return state !== undefined && ["in_doubt", "blocked"].includes(state);
 }
 
 function unsafeTickState(state: string): boolean {

@@ -337,6 +337,112 @@ describe("durable harness runtime", () => {
       expect(plist.match(/<string>\/dev\/null<\/string>/gu)).toHaveLength(2);
     }
   });
+
+  it("survives 1000 ticks with intermittent failures without busy-looping", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const root = temp("soak-1000");
+    const paths = resolveHarnessPaths({ ONE_CLI_HOME: root } as NodeJS.ProcessEnv);
+    const journal = new HostJournal(paths.journal);
+    const controller = new AbortController();
+    const clock = new FakeClock(0);
+    let ticks = 0;
+    let inspectCalls = 0;
+    clock.onWait = (count) => {
+      if (count >= 1_000) controller.abort();
+    };
+    const lanes = automaticLanes(
+      {
+        inspect: async () => {
+          inspectCalls += 1;
+          // Sparse transient faults: enough to exercise the circuit, but the
+          // next probe after a half-open window must be allowed to succeed so
+          // the product lane can keep advancing.
+          if (inspectCalls % 41 === 0) throw new Error("network timeout ECONNRESET");
+          return {
+            schema: "one-cli.harness/governance-readiness-v1" as const,
+            ready: true,
+            checks: [],
+            release: null,
+          };
+        },
+      },
+      {
+        tick: async () => {
+          ticks += 1;
+          if (ticks % 23 === 0) {
+            return {
+              action: "product",
+              state: "blocked",
+              phase: "normal" as const,
+              // Non-transient: must not permanently reopen the provider circuit
+              // while the product counter is parked on the same tick.
+              detail: "gate:test failed with assertion mismatch",
+            };
+          }
+          if (ticks % 29 === 0) {
+            return {
+              action: "product",
+              state: "blocked",
+              phase: "normal" as const,
+              detail: "provider temporarily unavailable 504",
+            };
+          }
+          return {
+            action: "product",
+            state: "idle",
+            phase: "normal" as const,
+            detail: "idle",
+          };
+        },
+      },
+      {
+        tick: async () => ({
+          action: "verifier-status",
+          state: "idle",
+          detail: "ok",
+        }),
+      },
+      journal,
+    );
+
+    await expect(runLoop({
+      once: false,
+      intervalMs: 1_000,
+      paths,
+      journal,
+      supervisor: lanes,
+      clock,
+      signal: controller.signal,
+    })).resolves.toBe(0);
+
+    expect(clock.waits.length).toBeGreaterThanOrEqual(1_000);
+    expect(ticks).toBeGreaterThan(900);
+    expect(clock.waits.every((wait) => wait >= 1_000)).toBe(true);
+    expect(journal.read().some((event) => event.type === "harness.heartbeat")).toBe(true);
+    expect(journal.read().some((event) => event.type === "harness.circuit")).toBe(true);
+  }, 60_000);
+});
+
+describe("service circuit", () => {
+  it("opens after repeated transient failures and half-opens after the window", async () => {
+    const { ServiceCircuit } = await import("../../harness/src/circuit.js");
+    let now = 1_000;
+    const circuit = new ServiceCircuit({
+      failureThreshold: 3,
+      openMs: 10_000,
+      now: () => now,
+    });
+    circuit.recordFailure();
+    circuit.recordFailure();
+    expect(circuit.isOpen()).toBe(false);
+    circuit.recordFailure();
+    expect(circuit.isOpen()).toBe(true);
+    expect(circuit.nextAttemptAt()).toBe(11_000);
+    now = 11_000;
+    expect(circuit.isOpen()).toBe(false);
+    circuit.recordSuccess();
+    expect(circuit.snapshot().failures).toBe(0);
+  });
 });
 
 class FakeClock implements HarnessClock {
@@ -474,3 +580,4 @@ function writeOversizedLegacyJournal(filePath: string): string {
   fs.writeFileSync(filePath, legacy);
   return legacy;
 }
+

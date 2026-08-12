@@ -173,7 +173,7 @@ describe("harness machine recovery", () => {
 
   it("backs off transient failures durably and resumes verifying when due", async () => {
     let now = 1_000;
-    const fixture = recoveryFixture(() => now);
+    const fixture = recoveryFixture({ now: () => now, random: () => 1 });
     const transient = receipt({ stderr: "network timeout ECONNRESET" });
     const waiting = status({
       detail: {
@@ -517,7 +517,7 @@ describe("harness machine recovery", () => {
   });
 });
 
-function recoveryFixture(now?: () => number) {
+function recoveryFixture(options?: { now?: () => number; random?: () => number }) {
   const root = makeTempDir("harness-recovery");
   roots.push(root);
   const journal = new HostJournal(path.join(root, "journal.jsonl"));
@@ -571,7 +571,8 @@ function recoveryFixture(now?: () => number) {
       github: github as unknown as GitHubPort,
       journal,
       recoveryKey,
-      ...(now ? { now } : {}),
+      ...(options?.now ? { now: options.now } : {}),
+      ...(options?.random ? { random: options.random } : {}),
     }),
   };
 }
