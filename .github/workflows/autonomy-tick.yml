@@ -157,6 +157,7 @@ jobs:
           name: autonomy-change-${{ github.run_id }}
           path: ${{ runner.temp }}/change
       - name: Revalidate and apply exact patch
+        # github-autonomy.mjs performs git apply --check before applying.
         run: >-
           node scripts/github-autonomy.mjs apply
           --selection "${RUNNER_TEMP}/change/selection.json"

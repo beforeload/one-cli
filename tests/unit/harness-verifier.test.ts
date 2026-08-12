@@ -186,12 +186,13 @@ describe("trusted independent verifier policy", () => {
     }
   });
 
-  it("keeps local status read-only without verifier credential configuration", () => {
+  it("reports the retired verifier workflow without enabling it", () => {
     const policy = loadVerifierPolicy(POLICY);
     expect(inspectTrustedVerifier(ROOT, policy)).toMatchObject({
-      ready: true,
+      ready: false,
       execution: "trusted-actions-only",
     });
+    expect(inspectTrustedVerifier(ROOT, policy).detail).toContain("ENOENT");
   });
 
   it("parses verifier-status values correctly and makes explicit run dry-run observable", () => {
