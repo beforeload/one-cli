@@ -37,7 +37,7 @@ jobs:
             case "$path" in
               AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS | harness/* | \
               .npmrc | package.json | package-lock.json | scripts/bootstrap-verifier-runner.sh | \
-              scripts/independent-verifier.mjs | \
+              scripts/independent-verifier.mjs | scripts/github-autonomy.mjs | \
               scripts/validate-autonomy.mjs | scripts/validate-harness.mjs | tsconfig.json | \
               tsconfig.build.json | src/agent.ts | src/approval.ts | src/autonomy/cli.ts | \
               src/autonomy/intake.ts | src/autonomy/maintenance.ts | \

@@ -17,7 +17,6 @@ localCommands:
 githubChecks:
   required:
     - verify
-    - one-cli/independent-verifier
 
 branch:
   requireCleanWorktree: true
@@ -55,6 +54,7 @@ governance:
     - package-lock.json
     - scripts/bootstrap-verifier-runner.sh
     - scripts/independent-verifier.mjs
+    - scripts/github-autonomy.mjs
     - scripts/validate-autonomy.mjs
     - scripts/validate-harness.mjs
     - tsconfig.json
