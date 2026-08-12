@@ -238,10 +238,15 @@ the repository.
 
 Each 30-minute tick acquires the host lock and first runs the read-only live
 governance readiness port. Any failed invariant blocks product and recovery
-with zero product calls. Once ready, it runs only the least-privilege product
-lane, validates the non-executable parent, and uses strict JSON status,
-reconciles the active attempt, and fails closed for `in_doubt`, `blocked`, or
-`waiting_evidence`. During cold-start it reconciles deterministic issue
+with zero product calls. Once ready, it runs the least-privilege product lane
+plus an independent verifier-status lane. The durable loop auto-recovers
+`waiting_evidence` via machine probe → deterministic diagnosis →
+`--machine-evidence` retry (with exponential full-jitter backoff), or
+quarantines and opens a remediation issue after the identical-fingerprint
+budget. Transient GitHub/provider flaps open a short infrastructure circuit so
+the loop parks instead of busy-ticking. Manual `retry --evidence` remains
+break-glass only. Hard `in_doubt` / `blocked` still fail closed for operators.
+During cold-start it reconciles deterministic issue
 markers, keeps exactly one open roadmap child `agent-ready`, and invokes:
 
 ```text

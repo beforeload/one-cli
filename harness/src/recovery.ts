@@ -44,6 +44,7 @@ export interface RecoveryTickResult {
 
 export class HarnessRecovery {
   private readonly now: () => number;
+  private readonly random: () => number;
 
   constructor(
     private readonly dependencies: {
@@ -52,10 +53,13 @@ export class HarnessRecovery {
       journal: HostJournal;
       recoveryKey: Uint8Array;
       now?: () => number;
+      /** Returns a unit interval used for backoff jitter. Defaults to Math.random. */
+      random?: () => number;
       modelAdvice?: (receipt: FailureReceiptView) => Promise<string | undefined>;
     },
   ) {
     this.now = dependencies.now ?? Date.now;
+    this.random = dependencies.random ?? Math.random;
   }
 
   async recoverWaitingAttempt(
@@ -479,16 +483,20 @@ export class HarnessRecovery {
       return existingAt;
     }
     const count = legacyFailureCount(attempt);
-    const delay = Math.min(
+    const base = Math.min(
       MAX_BACKOFF_MS,
       diagnosis.backoffMs * 2 ** Math.min(Math.max(0, count - 1), 8),
     );
+    // Full-jitter: delay ∈ [0, base] so concurrent hosts do not retry in lockstep.
+    const unit = Math.min(1, Math.max(0, this.random()));
+    const delay = Math.floor(base * unit);
     const nextAttemptAt = this.now() + delay;
     this.dependencies.journal.append("harness.recovery-scheduled", {
       operationId,
       attemptId: attempt.id,
       category: diagnosis.category,
       nextAttemptAt,
+      backoffMs: delay,
     });
     return nextAttemptAt;
   }
@@ -545,6 +553,139 @@ export class HarnessRecovery {
 
 export function newestFailureReceipt(attempt: AttemptStatus): FailureReceiptView | undefined {
   return failureReceipts(attempt).at(-1);
+}
+
+/** Compact recovery view for `harness status` / tick health. */
+export function recoveryStatusSnapshot(
+  attempt: AttemptStatus | null | undefined,
+  journal: HostJournal,
+): {
+  category: string | null;
+  fingerprint: string | null;
+  failureCount: number;
+  attemptBudget: number;
+  nextAttemptAt: number | null;
+  decision: string | null;
+  reason: string | null;
+  remediationIssueNumber: number | null;
+  quarantined: boolean;
+} | null {
+  if (!attempt) return null;
+  const receipt = newestFailureReceipt(attempt);
+  const detail = attempt.detail ?? {};
+  const lastFailure = object(detail.lastFailure);
+  const count =
+    typeof lastFailure.count === "number" && Number.isSafeInteger(lastFailure.count)
+      ? lastFailure.count
+      : receipt
+        ? 1
+        : 0;
+  const events = journal.read(Number.MAX_SAFE_INTEGER);
+  const scheduled = events
+    .filter((event) => event.type === "harness.recovery-scheduled")
+    .filter((event) => event.data.attemptId === attempt.id)
+    .at(-1);
+  const nextAttemptAt =
+    typeof scheduled?.data.nextAttemptAt === "number" ? scheduled.data.nextAttemptAt : null;
+  const diagnosed = events
+    .filter((event) => event.type === "harness.recovery-diagnosed")
+    .filter((event) => event.data.attemptId === attempt.id)
+    .at(-1);
+  const fingerprint = receipt?.fingerprint ??
+    (typeof lastFailure.fingerprint === "string" ? lastFailure.fingerprint : null);
+  const remediation = fingerprint
+    ? events
+      .filter((event) => event.type === "harness.recovery-remediation-created")
+      .filter((event) => event.data.fingerprint === fingerprint)
+      .at(-1)
+    : undefined;
+  const quarantined = attempt.state === "quarantined" ||
+    typeof remediation?.data.remediationIssueNumber === "number";
+  if (!receipt && count === 0 && nextAttemptAt === null && !diagnosed && !quarantined) {
+    return null;
+  }
+  return {
+    category: typeof diagnosed?.data.category === "string"
+      ? diagnosed.data.category
+      : null,
+    fingerprint,
+    failureCount: count,
+    attemptBudget: 3,
+    nextAttemptAt,
+    decision: typeof diagnosed?.data.decision === "string" ? diagnosed.data.decision : null,
+    reason: typeof diagnosed?.data.reason === "string" ? diagnosed.data.reason : null,
+    remediationIssueNumber:
+      typeof remediation?.data.remediationIssueNumber === "number"
+        ? remediation.data.remediationIssueNumber
+        : null,
+    quarantined,
+  };
+}
+
+/** Durable loop health for `harness status` beyond the active attempt. */
+export function runtimeHealthSnapshot(journal: HostJournal): {
+  lastSuccessAt: string | null;
+  lanes: {
+    product: string | null;
+    verifier: string | null;
+    recovery: string | null;
+  };
+  circuits: {
+    github: { open: boolean; detail: string | null };
+    provider: { open: boolean; detail: string | null };
+  };
+} {
+  const events = journal.read(Number.MAX_SAFE_INTEGER);
+  const lastSuccess = events.filter((event) => event.type === "harness.tick-completed").at(-1);
+  const lastBlocked = events.filter((event) => event.type === "harness.tick-blocked").at(-1);
+  const lastVerifier = events.filter((event) =>
+    event.type === "harness.verifier-lane" || event.type === "harness.verifier-lane-failed"
+  ).at(-1);
+  const lastRecovery = events.filter((event) =>
+    event.type.startsWith("harness.recovery-")
+  ).at(-1);
+  const lastCircuitGithub = events
+    .filter((event) => event.type === "harness.circuit" && event.data.service === "github")
+    .at(-1);
+  const lastCircuitProvider = events
+    .filter((event) => event.type === "harness.circuit" && event.data.service === "provider")
+    .at(-1);
+  return {
+    lastSuccessAt: typeof lastSuccess?.at === "string" ? lastSuccess.at : null,
+    lanes: {
+      product: typeof lastBlocked?.data.state === "string"
+        ? String(lastBlocked.data.state)
+        : typeof lastSuccess?.data.state === "string"
+          ? String(lastSuccess.data.state)
+          : null,
+      verifier: typeof lastVerifier?.data.state === "string"
+        ? String(lastVerifier.data.state)
+        : lastVerifier?.type === "harness.verifier-lane-failed"
+          ? "failed"
+          : null,
+      recovery: typeof lastRecovery?.data.decision === "string"
+        ? String(lastRecovery.data.decision)
+        : typeof lastRecovery?.type === "string"
+          ? lastRecovery.type.replace(/^harness\.recovery-/u, "")
+          : null,
+    },
+    circuits: {
+      github: {
+        open: lastCircuitGithub?.data.open === true,
+        detail: lastCircuitGithub?.data.open === true &&
+            typeof lastCircuitGithub.data.detail === "string"
+          ? lastCircuitGithub.data.detail
+          : null,
+      },
+      provider: {
+        open: lastCircuitProvider?.data.open === true,
+        detail: lastCircuitProvider?.data.open === true &&
+            typeof lastCircuitProvider.data.detail === "string"
+          ? lastCircuitProvider.data.detail
+          : null,
+      },
+    },
+  };
 }
 
 export function failureReceipts(attempt: AttemptStatus): FailureReceiptView[] {

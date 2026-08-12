@@ -64,7 +64,24 @@ Research, triage, and dogfood create Issues; they do not fix findings inline.
    as bounded waiting states, not code failures. Release work that requires a
    product decision instead of guessing.
 
-## Protected governance
+## Unattended recovery
+
+The durable harness loop is the normal recovery path. When an attempt enters
+`waiting_evidence`, the host collects a replayable failure receipt, classifies
+it deterministically, and either schedules a bounded `--machine-evidence`
+retry, parks with backoff, decomposes an environment blocker, or quarantines
+and opens an idempotent remediation Issue. Manual `retry --evidence` is
+break-glass only and is not part of the unattended path. Models may propose
+diagnosis JSON; they cannot grant retry, merge, or governance authority.
+Product Workers never receive verifier credentials, custom App private keys, or
+the owner keyring identity. Independent verification stays on the built-in
+GitHub Actions App ID `15368` via `pull_request_target`; there is no host-local
+`github-app.ts` JWT verifier.
+
+Blocked, parked, or quarantined product work must not stop the long-running
+harness process. Independent verifier-status and infrastructure circuit
+handling continue while a single child is isolated. Only host-fatal corruption
+(config, identity mismatch, journal tamper) exits for launchd restart.
 
 The protected paths are:
 
