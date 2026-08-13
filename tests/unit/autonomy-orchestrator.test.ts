@@ -9,6 +9,7 @@ import type {
   GitHubPullRequest,
 } from "../../src/autonomy/github.js";
 import { GitHubRefConflictError } from "../../src/autonomy/github.js";
+import { LeaseLostError } from "../../src/autonomy/lease.js";
 import {
   AutonomyOrchestrator,
   type OrchestratorGitPort,
@@ -671,11 +672,22 @@ describe("AutonomyOrchestrator", () => {
       holdWorker,
       workerStarted,
     });
+    let settled: Promise<
+      | { status: "fulfilled"; result: Awaited<ReturnType<typeof harness.tick>> }
+      | { status: "rejected"; error: unknown }
+    > | undefined;
     try {
       await harness.tick();
       const running = harness.tick();
+      settled = running.then(
+        (result) => ({ status: "fulfilled" as const, result }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      );
       await started;
+      const afterSetup = harness.store.listEvents({ limit: 10_000 }).at(-1)?.seq ?? 0;
+
       await vi.advanceTimersByTimeAsync(80);
+
       expect(() =>
         harness.store.acquireLease({
           resource: `coordinator:${harness.config.repoKey}`,
@@ -683,9 +695,87 @@ describe("AutonomyOrchestrator", () => {
           ttlMs: 30,
         }),
       ).toThrow("held by another owner");
+      expect(
+        harness.store
+          .listEvents({ afterSeq: afterSetup, aggregateType: "lease" })
+          .filter((event) => event.type === "lease.heartbeat")
+          .map((event) => event.aggregateId),
+      ).toEqual(
+        expect.arrayContaining([
+          `coordinator:${harness.config.repoKey}`,
+          "issue:github-7",
+        ]),
+      );
+
       finishWorker();
-      await expect(running).resolves.toMatchObject({ state: "verifying" });
+      const outcome = await settled;
+      if (outcome.status === "rejected") throw outcome.error;
+      expect(outcome.result).toMatchObject({ state: "verifying" });
     } finally {
+      finishWorker();
+      await settled;
+      harness.store.close();
+    }
+  });
+
+  it("fails deterministically when a heartbeat finds a newer issue owner", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    let finishWorker!: () => void;
+    let workerStarted!: () => void;
+    const holdWorker = new Promise<void>((resolve) => {
+      finishWorker = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      workerStarted = resolve;
+    });
+    const harness = createHarness("propose", roots, {
+      coordinatorTtlMs: 30,
+      issueTtlMs: 5,
+      holdWorker,
+      workerStarted,
+    });
+    let takeover: ReturnType<AutonomyStore["acquireLease"]> | undefined;
+    let settled: Promise<
+      | { status: "fulfilled"; result: Awaited<ReturnType<typeof harness.tick>> }
+      | { status: "rejected"; error: unknown }
+    > | undefined;
+    try {
+      await harness.tick();
+      const running = harness.tick();
+      settled = running.then(
+        (result) => ({ status: "fulfilled" as const, result }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      );
+      await started;
+
+      await vi.advanceTimersByTimeAsync(5);
+      takeover = harness.store.acquireLease({
+        resource: "issue:github-7",
+        owner: "newer-owner",
+        ttlMs: 30,
+      });
+      const afterTakeover = harness.store.listEvents({ limit: 10_000 }).at(-1)?.seq ?? 0;
+
+      await vi.advanceTimersByTimeAsync(5);
+      finishWorker();
+      const outcome = await settled;
+
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "fulfilled") throw new Error("heartbeat unexpectedly succeeded");
+      expect(outcome.error).toBeInstanceOf(LeaseLostError);
+      expect(
+        harness.store
+          .listEvents({ afterSeq: afterTakeover, aggregateType: "lease" })
+          .filter((event) => event.type === "lease.heartbeat")
+          .map((event) => event.aggregateId),
+      ).not.toContain("issue:github-7");
+      expect(harness.store.releaseLease(takeover)).toBe(true);
+      takeover = undefined;
+    } finally {
+      finishWorker();
+      await settled;
+      if (takeover) harness.store.releaseLease(takeover);
       harness.store.close();
     }
   });

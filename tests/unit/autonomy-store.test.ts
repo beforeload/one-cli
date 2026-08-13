@@ -3,7 +3,11 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ApprovalBinding } from "../../src/autonomy/domain.js";
-import { LeaseConflictError, LeaseLostError } from "../../src/autonomy/lease.js";
+import {
+  LeaseConflictError,
+  LeaseCoordinator,
+  LeaseLostError,
+} from "../../src/autonomy/lease.js";
 import { AutonomyStore } from "../../src/autonomy/store.js";
 import { makeTempDir, removeTempDir } from "../helpers.js";
 
@@ -62,6 +66,55 @@ describe("AutonomyStore", () => {
     );
     expect(store.releaseLease({ ...first, now: 1_151 })).toBe(false);
     expect(store.releaseLease({ ...takeover, now: 1_151 })).toBe(true);
+
+    store.close();
+    store = new AutonomyStore(databasePath);
+    const reacquired = store.acquireLease({
+      resource: "issue:issue-1",
+      owner: takeover.owner,
+      ttlMs: 100,
+      now: 1_151,
+    });
+    expect(reacquired.fence).toBe(3);
+    expect(() => store.heartbeatLease({ ...takeover, ttlMs: 100, now: 1_152 })).toThrow(
+      LeaseLostError,
+    );
+    expect(store.releaseLease({ ...takeover, now: 1_152 })).toBe(false);
+    expect(store.releaseLease({ ...reacquired, now: 1_152 })).toBe(true);
+  });
+
+  it("renews leases with an injected clock and records only new heartbeats", () => {
+    let now = 2_000;
+    const leases = new LeaseCoordinator(store, () => now);
+    let grant = leases.acquireIssue("issue-1", "worker-clock", 100);
+    const afterSetup = store.listEvents({ limit: 10_000 }).at(-1)?.seq ?? 0;
+
+    now = 2_040;
+    grant = leases.heartbeat(grant, 100);
+    now = 2_080;
+    grant = leases.heartbeat(grant, 100);
+
+    expect(grant.expiresAt).toBe(2_180);
+    expect(
+      store
+        .listEvents({
+          afterSeq: afterSetup,
+          aggregateType: "lease",
+          aggregateId: grant.resource,
+        })
+        .map((event) => ({ type: event.type, createdAt: event.createdAt, data: event.data })),
+    ).toEqual([
+      {
+        type: "lease.heartbeat",
+        createdAt: 2_040,
+        data: { owner: "worker-clock", fence: grant.fence, expiresAt: 2_140 },
+      },
+      {
+        type: "lease.heartbeat",
+        createdAt: 2_080,
+        data: { owner: "worker-clock", fence: grant.fence, expiresAt: 2_180 },
+      },
+    ]);
   });
 
   it("allows only declared attempt transitions", () => {
