@@ -586,6 +586,51 @@ describe("AutonomyOrchestrator", () => {
     }
   });
 
+  it("terminates a proven-impossible attempt with durable failure evidence", async () => {
+    const harness = createHarness("propose", roots, { workerFailures: 3 });
+    try {
+      await harness.tick();
+      expect((await harness.tick()).state).toBe("waiting_evidence");
+      const attemptId = harness.store.getActiveAttempt()!.id;
+      await harness.orchestrator.retryAttempt(
+        attemptId,
+        "first independent diagnosis",
+        new AbortController().signal,
+      );
+      expect((await harness.tick()).state).toBe("waiting_evidence");
+      await harness.orchestrator.retryAttempt(
+        attemptId,
+        "second independent diagnosis",
+        new AbortController().signal,
+      );
+
+      await expect(harness.tick()).resolves.toMatchObject({ state: "failed" });
+      expect(harness.store.getActiveAttempt()).toBeUndefined();
+      expect(harness.store.getAttempt(attemptId)).toMatchObject({
+        state: "failed",
+        claim: { status: "released" },
+        detail: {
+          lastFailure: { count: 3, fingerprint: expect.any(String) },
+          failureReceipts: [{}, {}, {}],
+          failureEvidence: [
+            { evidence: "first independent diagnosis", evidenceDigest: expect.any(String) },
+            { evidence: "second independent diagnosis", evidenceDigest: expect.any(String) },
+          ],
+        },
+      });
+      expect(() =>
+        harness.store.acquireLease({
+          resource: "issue:github-7",
+          owner: "retry-after-terminal",
+          ttlMs: 1_000,
+          now: 10_000,
+        }),
+      ).not.toThrow();
+    } finally {
+      harness.store.close();
+    }
+  });
+
   it("releases a recovery claim once a published branch is proven", async () => {
     const harness = createHarness("auto-pr", roots, { githubCheckFailures: 1 });
     try {

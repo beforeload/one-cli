@@ -446,12 +446,29 @@ export function evaluateDirectEligibility(input: {
   }
   const authority = gapTaxonomyAuthority(candidate.classification);
   const entry = TAXONOMY[candidate.classification.subcode];
+  let observedClassification: z.infer<typeof GapClassificationSchema> | undefined;
+  try {
+    observedClassification = classifyGapObservation(candidate.observation);
+  } catch {
+    // An unclassifiable observation cannot authorize implementation work.
+  }
+  if (
+    !observedClassification ||
+    observedClassification.category !== candidate.classification.category ||
+    observedClassification.topic !== candidate.classification.topic ||
+    observedClassification.subcode !== candidate.classification.subcode
+  ) {
+    reasons.push("observation does not support the candidate classification");
+  }
   if (
     candidate.localEvidence.detectorId !== candidate.classification.subcode ||
     !sameStrings(candidate.localEvidence.checkedPaths, entry.localPaths) ||
     !["absent", "partial"].includes(candidate.localEvidence.status)
   ) {
     reasons.push("independent local absence or partial evidence is missing");
+  }
+  if (!isCoherentLocalEvidence(candidate.localEvidence)) {
+    reasons.push("local capability evidence is internally inconsistent");
   }
   if (confidenceRank(candidate.confidence) < confidenceRank(input.policy.confidenceThreshold)) {
     reasons.push("confidence is below policy threshold");
@@ -606,6 +623,25 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
     left.length === right.length &&
     left.every((value, index) => value === right[index])
   );
+}
+
+function isCoherentLocalEvidence(evidence: LocalCapabilityEvidence): boolean {
+  const checked = new Set(evidence.checkedPaths);
+  const matched = new Set(evidence.matchedPaths);
+  const absent = new Set(evidence.absentPaths);
+  if (
+    checked.size !== evidence.checkedPaths.length ||
+    matched.size !== evidence.matchedPaths.length ||
+    absent.size !== evidence.absentPaths.length ||
+    [...matched].some((value) => !checked.has(value) || absent.has(value)) ||
+    [...absent].some((value) => !checked.has(value)) ||
+    [...checked].some((value) => !matched.has(value) && !absent.has(value))
+  ) {
+    return false;
+  }
+  const expectedStatus =
+    matched.size === 0 ? "absent" : absent.size > 0 ? "partial" : "present";
+  return evidence.status === expectedStatus;
 }
 
 function isWithin(root: string, candidate: string): boolean {
