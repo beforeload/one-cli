@@ -170,7 +170,7 @@ jobs:
         with:
           name: autonomy-verified-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/change/selection.json
+            ${{ runner.temp }}/change/selection/selection.json
             ${{ runner.temp }}/change/change.patch
             ${{ runner.temp }}/change/change.json
           if-no-files-found: error
