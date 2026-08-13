@@ -210,6 +210,32 @@ describe("MaintenanceCoordinator", () => {
     expect(harness.store.getGapFinding("gap-one")?.status).toBe("promoted");
   });
 
+  it("terminally blocks a semantically inconsistent gap with durable evidence", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const harness = createHarness({ sources: [source] });
+    queueGap(harness.store, harness.config, source, "gap-inconsistent", 90, {
+      title: "Parallel agents",
+      body: "Concurrent subagent worktrees improve delivery.",
+    });
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "blocked",
+    });
+    expect(harness.findingNormalizer.normalize).not.toHaveBeenCalled();
+    expect(harness.intake.promoteCommunityFinding).not.toHaveBeenCalled();
+    expect(harness.store.getGapFinding("gap-inconsistent")).toMatchObject({
+      status: "blocked",
+      retryAfter: null,
+      evidence: {
+        promotion: {
+          status: "blocked",
+          reason: "observation does not support the candidate classification",
+        },
+      },
+    });
+  });
+
   it("returns the next tick to the ready queue after one gap promotion", async () => {
     const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
     const harness = createHarness({ sources: [source] });
@@ -631,6 +657,13 @@ function queueGap(
   source: CommunitySource,
   fingerprint: string,
   score: number,
+  observationText: {
+    title: string;
+    body: string;
+  } = {
+    title: "Windows platform compatibility",
+    body: "Cross-platform support for Windows and macOS.",
+  },
 ): void {
   const externalId = `${fingerprint}-commit`;
   const sourceUrl = `${source.repository}/commit/${"b".repeat(40)}`;
@@ -658,8 +691,8 @@ function queueGap(
       kind: "repository" as const,
       externalId,
       sha: "b".repeat(40),
-      title: "Windows platform compatibility",
-      body: "Cross-platform support for Windows and macOS.",
+      title: observationText.title,
+      body: observationText.body,
       observedAt: 100_000,
       incremental: true,
     },
