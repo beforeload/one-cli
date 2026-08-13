@@ -29,7 +29,7 @@ import {
 } from "./domain.js";
 import { LeaseConflictError, LeaseLostError } from "./lease.js";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
   [
@@ -343,6 +343,24 @@ const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
       UPDATE research_checkpoints
       SET channel_state = 'baselined'
       WHERE kind = 'repository' OR last_external_id IS NOT NULL OR last_sha IS NOT NULL;
+    `,
+  ],
+  [
+    9,
+    `
+      CREATE TABLE IF NOT EXISTS leases (
+        resource TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        fence INTEGER NOT NULL CHECK(fence > 0),
+        expires_at INTEGER NOT NULL,
+        heartbeat_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE lease_fences (
+        resource TEXT PRIMARY KEY,
+        fence INTEGER NOT NULL CHECK(fence > 0)
+      ) STRICT;
+      INSERT INTO lease_fences(resource, fence)
+      SELECT resource, fence FROM leases;
     `,
   ],
 ];
@@ -950,7 +968,17 @@ export class AutonomyStore {
         .get(input.resource) as unknown as LeaseRow | undefined;
       if (existing && existing.expires_at > now) throw new LeaseConflictError(input.resource);
 
-      const fence = existing ? existing.fence + 1 : 1;
+      const initialFence = (existing?.fence ?? 0) + 1;
+      requireFence(initialFence);
+      const fenceRow = this.database
+        .prepare(
+          `INSERT INTO lease_fences(resource, fence) VALUES (?, ?)
+           ON CONFLICT(resource) DO UPDATE SET fence = lease_fences.fence + 1
+           RETURNING fence`,
+        )
+        .get(input.resource, initialFence) as unknown as { fence: number };
+      const fence = fenceRow.fence;
+      requireFence(fence);
       if (existing) {
         this.database
           .prepare(

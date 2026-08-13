@@ -158,19 +158,32 @@ describe("MaintenanceCoordinator", () => {
     const harness = createHarness();
     addActiveAttempt(harness.store);
     let release!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     harness.orchestrator.reconcile.mockImplementation(
       async () => await new Promise<undefined>((resolve) => {
         release = () => resolve(undefined);
+        markStarted();
       }),
     );
     const first = harness.coordinator.tick(signal());
-    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
-      action: "none",
-      state: "waiting",
-    });
-    release();
-    await first;
+    const settled = first.then(
+      (result) => ({ status: "fulfilled" as const, result }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    try {
+      await started;
+      await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+        action: "none",
+        state: "waiting",
+      });
+    } finally {
+      release();
+      const outcome = await settled;
+      if (outcome.status === "rejected") throw outcome.error;
+    }
   });
 
   it("keeps observe mode provider-free and mutation-free", async () => {
