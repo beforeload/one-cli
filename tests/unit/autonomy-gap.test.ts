@@ -185,6 +185,54 @@ describe("active gap engine", () => {
     }
   });
 
+  it("rejects observations and local evidence that disagree with their classification", () => {
+    const config = testConfig();
+    const classification = classifyGapObservation({
+      title: "Windows platform compatibility",
+      body: "Cross-platform support for Windows and macOS.",
+    });
+    const localEvidence = collectLocalCapabilityEvidence(config.repoRoot, classification);
+    const candidate = candidateFixture(config, {
+      classification,
+      localEvidence,
+      score: 100,
+    });
+    const inconsistentObservation: GapCandidate = {
+      ...candidate,
+      observation: {
+        ...candidate.observation,
+        title: "Parallel agents",
+        body: "Concurrent subagent worktrees improve delivery.",
+      },
+    };
+    expect(
+      evaluateDirectEligibility({
+        candidate: inconsistentObservation,
+        registry: config.community,
+        policy: config.gapPolicy,
+        now: candidate.observation.observedAt,
+      }).reasons,
+    ).toContain("observation does not support the candidate classification");
+
+    const missingPath = localEvidence.absentPaths[0];
+    expect(missingPath).toBeDefined();
+    const contradictoryEvidence: GapCandidate = {
+      ...candidate,
+      localEvidence: {
+        ...localEvidence,
+        matchedPaths: [...localEvidence.matchedPaths, missingPath!],
+      },
+    };
+    expect(
+      evaluateDirectEligibility({
+        candidate: contradictoryEvidence,
+        registry: config.community,
+        policy: config.gapPolicy,
+        now: candidate.observation.observedAt,
+      }).reasons,
+    ).toContain("local capability evidence is internally inconsistent");
+  });
+
   it("builds exactly thirteen sanitized normalized fields", () => {
     const draft = buildNormalizedGapDraft({
       sourceUrl: "https://github.com/QwenLM/qwen-code/discussions/42",
@@ -248,8 +296,14 @@ function candidateFixture(
       sourceUrl: "https://github.com/QwenLM/qwen-code/discussions/42",
       kind: "discussion",
       externalId: "42",
-      title: "Parallel agents",
-      body: "Concurrent subagent worktrees improve delivery.",
+      title:
+        values.classification.subcode === "platform.compatibility"
+          ? "Windows platform compatibility"
+          : "Parallel agents",
+      body:
+        values.classification.subcode === "platform.compatibility"
+          ? "Cross-platform support for Windows and macOS."
+          : "Concurrent subagent worktrees improve delivery.",
       observedAt,
       incremental: true,
     },
