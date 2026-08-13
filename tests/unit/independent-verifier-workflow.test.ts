@@ -26,7 +26,7 @@ describe("GitHub-hosted unattended workflow", () => {
   it("binds artifacts and runs the complete repository gate", () => {
     expect(workflow).toContain("git apply --check");
     expect(driver).toContain("patchSha256");
-    expect(driver).toContain("git apply");
+    expect(driver).toContain('execFileSync("git", ["apply", "--check"');
     expect(workflow).toContain("npm run check");
     expect(workflow).toContain("gh pr merge");
   });
