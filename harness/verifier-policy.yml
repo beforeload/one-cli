@@ -14,7 +14,7 @@ workflow:
     - one-cli-verifier
   blobSha: f2f6fc6c35133a7c1fec612154007ff854367974
   policyVersion: one-cli.independent-verifier/v4
-  policyHash: ade75b90f8566b6ef6f80a35a3664e8f4baa660ce68d3f7dc36c3d0071766c0f
+  policyHash: e7259aee9a1ad2565a411b7a3fc9f04d453d6931aae3ebe3a22cc41e44fbda10
   toolchain:
     nodeBinEnvironment: ONE_CLI_NODE_BIN
     nodeVersionRange: ">=22.13.0 <25"
