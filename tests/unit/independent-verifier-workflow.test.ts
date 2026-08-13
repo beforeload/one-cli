@@ -27,6 +27,12 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(workflow).toContain("git apply --check");
     expect(driver).toContain("patchSha256");
     expect(driver).toContain('execFileSync("git", ["apply", "--check"');
+    expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/change\/selection\/selection\.json"/gu))
+      ?.length
+      .toBe(1);
+    expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/verified\/selection\/selection\.json"/gu))
+      ?.length
+      .toBe(2);
     expect(workflow).toContain("npm run check");
     expect(workflow).toContain("gh pr merge");
   });
