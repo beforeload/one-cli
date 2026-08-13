@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const workflow = fs.readFileSync(path.join(ROOT, ".github/workflows/autonomy-tick.yml"), "utf8");
+const watchdog = fs.readFileSync(path.join(ROOT, ".github/workflows/autonomy-watchdog.yml"), "utf8");
 const verify = fs.readFileSync(path.join(ROOT, ".github/workflows/verify.yml"), "utf8");
 const driver = fs.readFileSync(path.join(ROOT, "scripts/github-autonomy.mjs"), "utf8");
 
@@ -21,6 +22,17 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(verify).not.toMatch(/self-hosted|127\.0\.0\.1|launchd/u);
     expect(workflow.match(/runs-on: ubuntu-latest/gu)?.length).toBeGreaterThanOrEqual(4);
     expect(verify).toContain("runs-on: ubuntu-latest");
+    expect(watchdog).toContain("runs-on: ubuntu-latest");
+    expect(watchdog).not.toMatch(/self-hosted|127\.0\.0\.1|launchd/u);
+  });
+
+  it("recovers a missed scheduled run on GitHub", () => {
+    expect(workflow).toContain('cron: "7,37 * * * *"');
+    expect(watchdog).toContain('cron: "17,47 * * * *"');
+    expect(watchdog).toContain("actions: write");
+    expect(watchdog).toContain("latest_success");
+    expect(watchdog).toContain("now - success_epoch < 2700");
+    expect(watchdog).toContain("actions/workflows/autonomy-tick.yml/dispatches");
   });
 
   it("binds artifacts and runs the complete repository gate", () => {

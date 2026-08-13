@@ -2,7 +2,8 @@ name: autonomy-tick
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Offset from the common :00/:30 load peaks on GitHub Actions.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
