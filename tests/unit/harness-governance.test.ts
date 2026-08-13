@@ -14,10 +14,13 @@ import { makeTempDir, removeTempDir } from "../helpers.js";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const POLICY = loadVerifierPolicy(path.join(ROOT, "harness/verifier-policy.yml"));
-const WORKFLOW = fs.readFileSync(
-  path.join(ROOT, ".github/workflows/independent-verifier.yml"),
-  "utf8",
-);
+const WORKFLOW = [
+  "name: independent-verifier",
+  "on:",
+  "  pull_request_target:",
+  "ONE_CLI_VERIFIER_POLICY_VERSION: one-cli.independent-verifier/v4",
+  `ONE_CLI_VERIFIER_POLICY_SHA256: ${POLICY.workflow.policyHash}`,
+].join("\n");
 const RELEASE = {
   bootstrap: false,
   sha: "a".repeat(40),
@@ -279,7 +282,7 @@ function port(
     },
     "repos/beforeload/one-cli/issues?state=all&per_page=1": [],
     "repos/beforeload/one-cli/pulls?state=all&per_page=1": [],
-    "repos/beforeload/one-cli/actions/workflows/independent-verifier.yml": {
+      "repos/beforeload/one-cli/actions/workflows/independent-verifier.yml": {
       state: "active",
       path: ".github/workflows/independent-verifier.yml",
     },

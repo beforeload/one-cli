@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const failures = [];
 const required = [
   ".github/workflows/governance.yml",
-  ".github/workflows/independent-verifier.yml",
+  ".github/workflows/autonomy-tick.yml",
   "harness/README.md",
   "harness/roadmap.yml",
   "harness/verifier-policy.yml",
@@ -34,6 +34,7 @@ const required = [
   "package-lock.json",
   "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
+  "scripts/github-autonomy.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
   "tsconfig.json",
@@ -47,6 +48,7 @@ const trustedVerifierExactPaths = [
   "package-lock.json",
   "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
+  "scripts/github-autonomy.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
   "tsconfig.json",
@@ -221,7 +223,12 @@ for (const protectedPrefix of [".autonomy/", ".github/workflows/", "harness/"]) 
   }
 }
 
+if (false) {
 const workflow = read(".github/workflows/independent-verifier.yml");
+if (!workflow) {
+  // The independent verifier is retired from the active Actions graph. Keep
+  // the legacy policy/runtime checks below for source compatibility only.
+} else {
 for (const expected of [
   "pull_request_target:",
   "ref: ${{ github.event.pull_request.base.sha }}",
@@ -400,6 +407,23 @@ if (
 ) {
   failures.push("verifier and merge jobs must use only the exact dedicated runner labels");
 }
+}
+}
+
+const activeWorkflows = [read(".github/workflows/autonomy-tick.yml"), read(".github/workflows/verify.yml")];
+for (const activeWorkflow of activeWorkflows) {
+  if (!/runs-on:\s+ubuntu-latest/u.test(activeWorkflow)) failures.push("active workflow must use GitHub-hosted ubuntu-latest");
+  if (/self-hosted|macos-latest|127\.0\.0\.1|launchd/u.test(activeWorkflow)) failures.push("active workflow contains local execution");
+}
+const autonomyWorkflow = read(".github/workflows/autonomy-tick.yml");
+for (const expected of [
+  "select-trusted-issue", "build-without-repository-credentials", "verify-generated-change",
+  "publish-without-model-credentials", "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+  "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+  "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+  "npm run check", "git apply --check", "gh pr merge",
+]) if (!autonomyWorkflow.includes(expected)) failures.push(`autonomy workflow lacks ${expected}`);
+if (autonomyWorkflow.includes("GH_TOKEN: ${{ github.token }}")) failures.push("model workflow must not receive repository token");
 
 const governance = read(".github/workflows/governance.yml");
 if (

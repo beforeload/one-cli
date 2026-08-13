@@ -51,9 +51,9 @@ Research, triage, and dogfood create Issues; they do not fix findings inline.
 4. Run only the configured local commands: `npm ci`, `npm run build`,
    `npm run typecheck`, `npm test`, `npm run test:integration`, and the
    configured smoke command.
-5. Require the GitHub checks named `verify` and
-   `one-cli/independent-verifier`, both pinned to the built-in GitHub Actions
-   App ID `15368`, plus a SHA-bound `github-actions[bot]` review before merge.
+5. Require the GitHub-hosted `verify` check before merge. Autonomous publication
+   uses a short-lived GitHub App token and GitHub branch protection; no model
+   job receives repository write credentials.
 6. Reconcile the generated merge commit and run targeted post-merge dogfood on
    changed user paths before releasing the lease or closing the source Issue.
 7. Fingerprint code failures by operation, exit code, and normalized error.
@@ -73,10 +73,10 @@ retry, parks with backoff, decomposes an environment blocker, or quarantines
 and opens an idempotent remediation Issue. Manual `retry --evidence` is
 break-glass only and is not part of the unattended path. Models may propose
 diagnosis JSON; they cannot grant retry, merge, or governance authority.
-Product Workers never receive verifier credentials, custom App private keys, or
-the owner keyring identity. Independent verification stays on the built-in
-GitHub Actions App ID `15368` via `pull_request_target`; there is no host-local
-`github-app.ts` JWT verifier.
+Product Workers never receive GitHub App private keys or the owner keyring
+identity. The active unattended path is GitHub Actions only; legacy local
+harness and verifier sources are retained for migration and are not invoked by
+active workflows.
 
 Blocked, parked, or quarantined product work must not stop the long-running
 harness process. Independent verifier-status and infrastructure circuit
@@ -103,14 +103,13 @@ build-configuration, policy, workflow, and runtime closure loaded from the
 trusted base before verifier secrets are made available. Ordinary product files
 under `src/**` are not protected merely because the trusted checkout is built.
 
-Every pull request, normal or protected, is verified by the trusted
-`pull_request_target` workflow loaded from the exact default-branch base SHA.
-The pull head is checked out separately as untrusted data and is never executed
-in the secret-bearing job. Protected evidence is the complete bounded git diff
-between pinned base and head objects; REST patch text is not authoritative.
+Every autonomous change is verified by the standard GitHub-hosted `verify`
+workflow. The model job checks out an exact base SHA without credentials and
+can only edit the issue's approved paths; a separate job applies the artifact,
+checks its SHA-256 binding, and runs the complete `npm run check` suite.
 Labels, issue text, pull text, worker self-review, and model output never grant
 an exception. After the one-time exact-SHA bootstrap, branch protection
-requires exactly `verify` and `one-cli/independent-verifier`;
+requires `verify`;
 `protected-paths` is non-required informational evidence. Repository Actions
 must be allowed to approve pull request reviews. Local governance readiness
 must prove strict status checks, admin enforcement, disabled force pushes and
@@ -122,36 +121,17 @@ repository/issue/pull endpoints for builder capabilities, and verifies the
 protected model-Worker policy still excludes shell/network tools and enforces
 exact approved write paths.
 
-The verifier and merge jobs run only on a repository runner with exact
-`self-hosted`, `macOS`, and `one-cli-verifier` labels. Governance readiness uses
-the owner read port to require at least one matching online, non-busy runner;
-an absent, offline, busy, or mislabeled runner blocks product execution.
-Both jobs must begin with the pinned offline host Node/npm preflight and may not
-use `actions/setup-node` or another hosted toolchain download action. The runner
-service supplies canonical `ONE_CLI_NODE_BIN` and an exact minimal PATH; Node
-must be `>=22.13.0` and `<25`.
-The verifier uses GitHub's ephemeral workflow token only for GitHub API,
-review, and merge operations under the built-in GitHub Actions App identity;
-there is no custom App, local verifier key, or repository secret.
-Applied verification requires the exact Actions and repository context, the
-trusted workflow blob and canonical policy hash, and, when `/user` is
-available, `github-actions[bot]` user ID `41898282`. It never queries
-`/installation` or an administration API.
-Two separate OpenAI-compatible calls use the runner-local proxy at
-`http://127.0.0.1:8085/v1`, placeholder key `local-proxy`, and distinct default
-models `claude-opus-4.8` and `gpt-5.4`. Host/repository variables may override
-the model IDs and localhost base URL, but pull-request content cannot. Both
-profiles are veto-only with 2-of-2 non-veto required; deterministic checks alone
-establish eligibility. The first job submits an exact-head review and must complete before a second job
-revalidates repository identity and `default_branch`, the live default-branch
-head, base SHA, head SHA, required-check App provenance, review actor/commit,
-and mergeability, then merges with an exact-SHA precondition. The workflow token
-does not call branch-protection or ruleset APIs; GitHub's merge API enforces the
-live protection rules. The host runtime is trusted and its owner credential
-coordinates repository writes, but model Workers receive no owner token,
-verifier credential, App value, or private key and cannot access the keyring.
-No allowed host, Worker, or verifier operation calls branch-administration,
-branch-protection mutation, or ruleset APIs.
+All active jobs run on GitHub-hosted `ubuntu-latest` runners with pinned
+checkout/setup-node/artifact actions. The model job receives only its model
+secret and has no `GITHUB_TOKEN`, `GH_TOKEN`, or shell tools. A publisher job
+creates a short-lived GitHub App token, pushes the exact verified branch, opens
+the PR, and enables GitHub auto-merge. No local runner, launchd service, or
+localhost model proxy is part of the unattended path.
+The standard `verify` workflow is the sole required status check. GitHub branch
+protection and the publisher App enforce live merge preconditions; the model
+cannot approve, merge, alter branch protection, or access repository secrets
+other than its explicitly configured model credential. No active operation calls
+branch-administration, branch-protection mutation, or ruleset APIs.
 
 Tracked content must not contain credentials, tokens, host-private paths,
 runtime ledgers, checkpoints, task identifiers, or reporting endpoints. The
