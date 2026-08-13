@@ -33,7 +33,7 @@ async function select() {
   if (repository !== "beforeload/one-cli" || owner !== "beforeload") {
     throw new Error("Workflow repository is not the pinned beforeload/one-cli repository");
   }
-  const issues = await githubList(token, repository, "issues?state=all&labels=agent-ready&per_page=100");
+  const issues = dedupeIssues(await githubList(token, repository, "issues?state=all&labels=agent-ready&per_page=100"));
   const pulls = await githubList(token, repository, "pulls?state=open&per_page=100");
   const roadmap = YAML.parse(read("harness/roadmap.yml"));
   const policy = YAML.parse(read("harness/verifier-policy.yml"));
@@ -45,9 +45,11 @@ async function select() {
   let candidate;
   for (const child of children) {
     const matches = issueRows.filter((issue) => checkedString(issue.body ?? "", "issue body").includes(child.marker));
-    if (matches.length !== 1) throw new Error(`Roadmap marker must identify exactly one issue: ${child.marker}`);
-    const issue = matches[0];
-    if (issue.state === "closed") continue;
+    if (matches.length === 0) throw new Error(`Roadmap marker must identify an issue: ${child.marker}`);
+    const openMatches = matches.filter((issue) => issue.state === "open");
+    if (openMatches.length > 1) throw new Error(`Roadmap marker must identify at most one open issue: ${child.marker}`);
+    if (openMatches.length === 0) continue;
+    const issue = openMatches[0];
     candidate = validateIssue(issue, owner, policy, child.approvedPaths, pulls);
     break;
   }
@@ -84,6 +86,24 @@ async function select() {
   writeJson(requiredArg("out"), selection);
   githubOutput("selected", "true");
   githubOutput("base_sha", baseSha);
+}
+
+function dedupeIssues(issues) {
+  const byNumber = new Map();
+  for (const issue of issues) {
+    if (!Number.isInteger(issue?.number) || issue.number <= 0) throw new Error("GitHub issue inventory contains an invalid issue number");
+    const prior = byNumber.get(issue.number);
+    if (prior === undefined) {
+      byNumber.set(issue.number, issue);
+      continue;
+    }
+    const priorBody = checkedString(prior.body ?? "", "issue body");
+    const currentBody = checkedString(issue.body ?? "", "issue body");
+    if (prior.state !== issue.state || priorBody !== currentBody || prior.updated_at !== issue.updated_at) {
+      throw new Error(`GitHub issue inventory contains conflicting records for issue #${issue.number}`);
+    }
+  }
+  return [...byNumber.values()];
 }
 
 function validateIssue(issue, owner, policy, expectedPaths, pulls) {
