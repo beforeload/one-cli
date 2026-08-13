@@ -55,4 +55,9 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(driver).toContain("at most one open issue");
     expect(driver).toContain("openMatches.length === 0");
   });
+
+  it("preserves lease fencing invariants in the model prompt", () => {
+    expect(driver).toContain("lease release must remove only the exact owner-and-fence row");
+    expect(driver).toContain("newer fenced owner to reacquire immediately");
+  });
 });
