@@ -223,8 +223,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          branch="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection.json" --field branch --suffix "-${RUN_ID}")"
-          title="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection.json" --field title)"
+          branch="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection/selection.json" --field branch --suffix "-${RUN_ID}")"
+          title="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection/selection.json" --field title)"
           node scripts/github-autonomy.mjs pr-body \
             --selection "${RUNNER_TEMP}/verified/selection/selection.json" \
             --manifest "${RUNNER_TEMP}/verified/change.json" \
