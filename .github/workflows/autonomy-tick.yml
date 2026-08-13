@@ -160,7 +160,7 @@ jobs:
         # github-autonomy.mjs performs git apply --check before applying.
         run: >-
           node scripts/github-autonomy.mjs apply
-          --selection "${RUNNER_TEMP}/change/selection.json"
+          --selection "${RUNNER_TEMP}/change/selection/selection.json"
           --patch "${RUNNER_TEMP}/change/change.patch"
           --manifest "${RUNNER_TEMP}/change/change.json"
       - name: Run all repository gates
@@ -214,7 +214,7 @@ jobs:
       - name: Revalidate verified patch
         run: >-
           node scripts/github-autonomy.mjs apply
-          --selection "${RUNNER_TEMP}/verified/selection.json"
+          --selection "${RUNNER_TEMP}/verified/selection/selection.json"
           --patch "${RUNNER_TEMP}/verified/change.patch"
           --manifest "${RUNNER_TEMP}/verified/change.json"
       - name: Push branch and open pull request
@@ -226,7 +226,7 @@ jobs:
           branch="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection.json" --field branch --suffix "-${RUN_ID}")"
           title="$(node scripts/github-autonomy.mjs value --selection "${RUNNER_TEMP}/verified/selection.json" --field title)"
           node scripts/github-autonomy.mjs pr-body \
-            --selection "${RUNNER_TEMP}/verified/selection.json" \
+            --selection "${RUNNER_TEMP}/verified/selection/selection.json" \
             --manifest "${RUNNER_TEMP}/verified/change.json" \
             --out "${RUNNER_TEMP}/pr-body.md"
           git config user.name one-cli-bot[bot]
