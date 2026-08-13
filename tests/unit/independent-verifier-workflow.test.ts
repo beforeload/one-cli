@@ -60,5 +60,6 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(driver).toContain("lease release must remove only the exact owner-and-fence row");
     expect(driver).toContain("newer fenced owner to reacquire immediately");
     expect(driver).toContain("never leave an unhandled promise rejection after cleanup");
+    expect(driver).toContain("assert only the new events produced by the operation under test");
   });
 });
