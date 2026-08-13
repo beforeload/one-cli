@@ -30,7 +30,7 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/change\/selection\/selection\.json"/gu)?.length ?? 0)
       .toBe(1);
     expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/verified\/selection\/selection\.json"/gu)?.length ?? 0)
-      .toBe(2);
+      .toBe(4);
     expect(workflow).toContain("npm run check");
     expect(workflow).toContain("gh pr merge");
   });
