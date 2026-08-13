@@ -59,5 +59,6 @@ describe("GitHub-hosted unattended workflow", () => {
   it("preserves lease fencing invariants in the model prompt", () => {
     expect(driver).toContain("lease release must remove only the exact owner-and-fence row");
     expect(driver).toContain("newer fenced owner to reacquire immediately");
+    expect(driver).toContain("never leave an unhandled promise rejection after cleanup");
   });
 });
