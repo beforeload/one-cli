@@ -47,4 +47,12 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(workflow).toContain("npm run check");
     expect(workflow).toContain("gh pr merge");
   });
+
+  it("deduplicates GitHub issue inventory before roadmap matching", () => {
+    expect(driver).toContain("dedupeIssues");
+    expect(driver).toContain("issues?state=all&labels=agent-ready&per_page=100");
+    expect(driver).toContain("conflicting records for issue #");
+    expect(driver).toContain("at most one open issue");
+    expect(driver).toContain("openMatches.length === 0");
+  });
 });
