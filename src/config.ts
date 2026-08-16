@@ -11,6 +11,9 @@ export const MAX_TOOL_RESULT_BYTES = 256 * 1024;
 export const MAX_WRITE_BYTES = 1024 * 1024;
 export const MAX_SHELL_OUTPUT_BYTES = 1024 * 1024;
 export const MAX_SESSION_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_MAX_CONTEXT_MESSAGES = 64;
+export const DEFAULT_MAX_CONTEXT_BYTES = 256 * 1024;
+export const DEFAULT_CONTEXT_RECENT_TURNS = 4;
 
 const RunConfigSchema = z.object({
   apiKey: z.string().min(1, "OPENAI_API_KEY is required"),
