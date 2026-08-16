@@ -3,7 +3,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runAgent } from "../../src/agent.js";
 import { DenyApprovalPort } from "../../src/approval.js";
-import type { ApprovalPort, ToolCall } from "../../src/domain.js";
+import type {
+  ApprovalPort,
+  ChatMessage,
+  ProviderEvent,
+  ToolCall,
+} from "../../src/domain.js";
 import type { RunConfig } from "../../src/config.js";
 import { SessionJournal } from "../../src/session.js";
 import { ToolRunner } from "../../src/tools.js";
@@ -109,6 +114,50 @@ describe("runAgent", () => {
     expect(result.ok).toBe(true);
     const secondRequest = provider.requests[1]!;
     expect(JSON.stringify(secondRequest.messages)).toContain("hello from workspace");
+    journal.release();
+  });
+
+  it("keeps provider context bounded without splitting tool receipts", async () => {
+    fs.writeFileSync(path.join(root, "README.md"), "bounded context");
+    const journal = SessionJournal.create(home, workspace.root, config.model);
+    const turns: Array<readonly ProviderEvent[]> = [];
+    for (let index = 0; index < 35; index++) {
+      turns.push([
+        {
+          type: "tool_call",
+          call: toolCall(`read-${index}`, "read", { path: "README.md" }),
+        },
+      ]);
+    }
+    turns.push([{ type: "text_delta", delta: "done" }]);
+    const provider = new ScriptedProvider(turns);
+
+    const result = await runAgent({
+      prompt: "read repeatedly",
+      config: { ...config, maxRounds: 40, maxToolCalls: 40 },
+      workspace,
+      provider,
+      tools: new ToolRunner(),
+      journal,
+      reporter: new CaptureReporter(),
+      approvalMode: "deny",
+      approval: new DenyApprovalPort(),
+      signal: new AbortController().signal,
+    });
+
+    expect(result.ok).toBe(true);
+    const context = provider.requests.at(-1)!.messages as readonly ChatMessage[];
+    expect(context.length).toBeLessThanOrEqual(64);
+    expect(context).toContainEqual({ role: "user", content: "read repeatedly" });
+    const callIds = new Set(
+      context.flatMap((message) =>
+        message.role === "assistant" ? (message.toolCalls ?? []).map((call) => call.id) : [],
+      ),
+    );
+    const resultIds = new Set(
+      context.flatMap((message) => (message.role === "tool" ? [message.toolCallId] : [])),
+    );
+    expect(resultIds).toEqual(callIds);
     journal.release();
   });
 
