@@ -70,6 +70,132 @@ export interface RecoveryEvidence {
   };
 }
 
+/**
+ * Closed taxonomy for deterministic CI-failure classification.
+ * `unknown` is the mandatory fallback so the classifier is total.
+ */
+export type FailureClass =
+  | "dependency"
+  | "typecheck"
+  | "lint"
+  | "unit-test"
+  | "e2e"
+  | "build"
+  | "credential"
+  | "roadmap-marker"
+  | "flaky-transient"
+  | "unknown";
+
+export const FAILURE_CLASSES: readonly FailureClass[] = [
+  "dependency",
+  "typecheck",
+  "lint",
+  "unit-test",
+  "e2e",
+  "build",
+  "credential",
+  "roadmap-marker",
+  "flaky-transient",
+  "unknown",
+] as const;
+
+export type DiagnosisReceiptSource =
+  | "local-process"
+  | "worker"
+  | "github-check"
+  | "reconciler";
+
+export interface DiagnosisProvenance {
+  producer: "one-cli";
+  attemptId: string;
+  operationId: string;
+}
+
+/**
+ * A bounded, content-addressed structured diagnosis of one CI/gate failure.
+ *
+ * It is a *bypass observation* (Phase 1 of PR self-heal): produced from a
+ * FailureReceipt via a deterministic, zero-LLM classifier and written additively
+ * onto attempt detail. It never drives state transitions or repairs — it only
+ * attributes a failure so humans (and later phases) can act. Content-addressed
+ * like FailureReceipt so equivalent diagnoses dedupe and stay auditable.
+ */
+export interface DiagnosisReceipt {
+  schema: "autonomy.one-cli/diagnosis-receipt-v1";
+  source: DiagnosisReceiptSource;
+  provenance: DiagnosisProvenance;
+  failureClass: FailureClass;
+  gate: string | null;
+  /** Repository-relative paths implicated by the failure, best-effort, bounded. */
+  affectedFiles: readonly string[];
+  rootCauseHypothesis: string;
+  /** Deterministic classifier confidence in [0, 1]. */
+  confidence: number;
+  /** Bounded, redacted excerpt of the log lines that drove classification. */
+  logExcerpt: string;
+  /** Fingerprint of the failure this diagnosis explains (from the FailureReceipt). */
+  failureFingerprint: string;
+  /** Content-addressed fingerprint of the diagnosis itself (class + cause + gate). */
+  fingerprint: string;
+  timestamp: number;
+  hash: string;
+}
+
+/**
+ * Lifecycle of a single self-heal repair task.
+ * `queued` → `in_progress` → `applied` → `verified`, or `abandoned` at any
+ * point when a safety boundary / bound is hit. It is deliberately *not* an
+ * {@link AttemptState}: repair progress is tracked additively on attempt
+ * detail (via a `healPhase` sub-phase) so the attempt state machine contract
+ * (ATTEMPT_TRANSITIONS) is never touched.
+ */
+export type RepairTaskStatus =
+  | "queued"
+  | "in_progress"
+  | "applied"
+  | "verified"
+  | "abandoned";
+
+export const REPAIR_TASK_STATUSES: readonly RepairTaskStatus[] = [
+  "queued",
+  "in_progress",
+  "applied",
+  "verified",
+  "abandoned",
+] as const;
+
+/**
+ * A bounded, content-addressed unit of repair work decomposed from a
+ * {@link DiagnosisReceipt} (Phase 2 of PR self-heal).
+ *
+ * Additive and auditable, mirroring {@link DiagnosisReceipt}: one RepairTask
+ * targets exactly one gate / one failure class. It never mutates the attempt
+ * state machine — the orchestrator drives it through a `healPhase` sub-phase on
+ * attempt detail. For `flaky-transient` the instruction is a plain CI re-run
+ * with no code change (empty `targetPaths`); classes on the safety boundary
+ * (credential / roadmap-marker / protected-path) are never decomposed into a
+ * task and are routed to a human instead.
+ */
+export interface RepairTask {
+  schema: "autonomy.one-cli/repair-task-v1";
+  taskId: string;
+  failureClass: FailureClass;
+  /** Fingerprint of the failure this task repairs (from the DiagnosisReceipt). */
+  failureFingerprint: string;
+  /** Repository-relative paths this task may modify. Empty for re-run-only. */
+  targetPaths: readonly string[];
+  /** Deterministic, human-readable action ("retry CI, no code change"). */
+  instruction: string;
+  /** Gate that must pass to consider this task verified (from the diagnosis). */
+  verifyGate: string | null;
+  /** taskIds that must reach `verified` before this task may start. */
+  dependsOn: readonly string[];
+  status: RepairTaskStatus;
+  createdAt: number;
+  /** Content-addressed fingerprint of the task (class + fingerprint + gate + paths + instruction). */
+  hash: string;
+}
+
 export type AttemptState =
   | "pending"
   | "running"

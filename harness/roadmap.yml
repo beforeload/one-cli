@@ -60,7 +60,6 @@ children:
     trustedExecutionMarker: "<!-- one-cli:trusted-execution:v1 -->"
     seedMarker: "<!-- one-cli:cold-start-seed:03-context-compaction:v1 -->"
     approvedPaths:
-      - src/agent.ts
       - src/domain.ts
       - src/session.ts
       - src/config.ts

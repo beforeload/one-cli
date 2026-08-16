@@ -5,6 +5,7 @@ import type { ChatProvider } from "../domain.js";
 import type { AutonomyConfig } from "./config.js";
 import type {
   Attempt,
+  DiagnosisReceipt,
   FailureReceipt,
   FailureReceiptSource,
   IssueClaimEvidence,
@@ -12,6 +13,11 @@ import type {
   LeaseGrant,
   RecoveryEvidence,
 } from "./domain.js";
+import {
+  classifyFailure,
+  createDiagnosisReceipt,
+  renderDiagnosisComment,
+} from "./diagnosis.js";
 import type {
   GitDiff,
   GitRepository,
@@ -2441,6 +2447,10 @@ export class AutonomyOrchestrator {
     const failures = asRecord(detail.failures);
     const count = typeof failures[fingerprint] === "number" ? (failures[fingerprint] as number) + 1 : 1;
     failures[fingerprint] = count;
+    // Phase 1 PR self-heal: deterministic, zero-LLM diagnosis. This is a bypass
+    // observation — it never changes the state machine, business code, or drives
+    // a repair. It only attributes the failure and records/annotates it.
+    const diagnosis = this.diagnoseFailure(attempt, receipt);
     const current = this.updateAttempt(attempt, {
       detail: mergeDetail(attempt, {
         failures,
@@ -2454,6 +2464,8 @@ export class AutonomyOrchestrator {
           receipt: jsonValue(receipt),
         },
         failureReceipts: this.appendFailureReceipt(attempt, receipt),
+        diagnosisReceipts: this.appendDiagnosisReceipt(attempt, diagnosis),
+        lastDiagnosis: jsonValue(diagnosis),
         failureEvidence: Array.isArray(detail.failureEvidence)
           ? detail.failureEvidence
           : [],
@@ -2461,6 +2473,9 @@ export class AutonomyOrchestrator {
         resumeState: failureResumeState(attempt, operation),
       }),
     });
+    // Best-effort: surface the structured diagnosis on the PR. Never let a comment
+    // failure disturb the failure-handling path (it is purely observational).
+    await this.commentDiagnosis(current, diagnosis, signal);
     if (count >= this.dependencies.config.issuePolicy.failureIsolation.identicalCodeFailureLimit) {
       const issueNo = issueNumber(current);
       try {
@@ -2537,6 +2552,86 @@ export class AutonomyOrchestrator {
     return existing.slice(
       -this.dependencies.config.recoveryPolicy.receipts.maxReceiptsPerAttempt,
     );
+  }
+
+  /**
+   * Phase 1 PR self-heal — deterministic, zero-LLM diagnosis of a failure.
+   * Pure observation: derives a structured DiagnosisReceipt from the failure
+   * receipt's logs. Does not transition state or repair anything.
+   */
+  private diagnoseFailure(attempt: Attempt, receipt: FailureReceipt): DiagnosisReceipt {
+    const log = [receipt.stderr, receipt.stdout, receipt.spawnError ?? ""]
+      .filter((part) => part.length > 0)
+      .join("\n");
+    const classification = classifyFailure({
+      log,
+      gate: receipt.gate,
+      failureFingerprint: receipt.fingerprint,
+    });
+    return createDiagnosisReceipt(
+      {
+        source: receipt.source,
+        attemptId: attempt.id,
+        operationId: `diagnosis:${attempt.id}:${receipt.fingerprint}`,
+        gate: receipt.gate,
+        failureFingerprint: receipt.fingerprint,
+        timestamp: this.now(),
+      },
+      classification,
+    );
+  }
+
+  private appendDiagnosisReceipt(attempt: Attempt, diagnosis: DiagnosisReceipt): JsonValue[] {
+    const existing = Array.isArray(detailObject(attempt).diagnosisReceipts)
+      ? [...(detailObject(attempt).diagnosisReceipts as readonly JsonValue[])]
+      : [];
+    existing.push(jsonValue(diagnosis));
+    return existing.slice(
+      -this.dependencies.config.recoveryPolicy.receipts.maxReceiptsPerAttempt,
+    );
+  }
+
+  /**
+   * Best-effort structured diagnosis comment on the PR. Purely observational:
+   * any failure here is swallowed so it can never disturb failure handling.
+   * Idempotent per (attempt, diagnosis fingerprint) via a hidden HTML marker.
+   */
+  private async commentDiagnosis(
+    attempt: Attempt,
+    diagnosis: DiagnosisReceipt,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (attempt.prNumber === null) return;
+    const prNumber = attempt.prNumber;
+    const marker = `<!-- one-cli:diagnosis:${attempt.id}:${diagnosis.fingerprint} -->`;
+    try {
+      await this.externalWrite(
+        attempt,
+        `diagnosis-comment:${attempt.id}:${diagnosis.fingerprint}`,
+        "github.comment",
+        { prNumber, failureClass: diagnosis.failureClass },
+        async () => {
+          const comment = await this.dependencies.github.createComment(
+            this.repositoryRef,
+            prNumber,
+            renderDiagnosisComment(diagnosis, marker),
+            signal,
+          );
+          return { commentId: comment.id };
+        },
+        async () => {
+          const comment = await this.dependencies.github.findIssueComment(
+            this.repositoryRef,
+            prNumber,
+            marker,
+            signal,
+          );
+          return comment ? { commentId: comment.id } : undefined;
+        },
+      );
+    } catch {
+      // Diagnosis comments are non-authoritative; never propagate their errors.
+    }
   }
 
   private processEvidence(result: ProcessResult): JsonValue {
