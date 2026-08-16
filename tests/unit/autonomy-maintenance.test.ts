@@ -158,19 +158,32 @@ describe("MaintenanceCoordinator", () => {
     const harness = createHarness();
     addActiveAttempt(harness.store);
     let release!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     harness.orchestrator.reconcile.mockImplementation(
       async () => await new Promise<undefined>((resolve) => {
         release = () => resolve(undefined);
+        markStarted();
       }),
     );
     const first = harness.coordinator.tick(signal());
-    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
-      action: "none",
-      state: "waiting",
-    });
-    release();
-    await first;
+    const settled = first.then(
+      (result) => ({ status: "fulfilled" as const, result }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    try {
+      await started;
+      await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+        action: "none",
+        state: "waiting",
+      });
+    } finally {
+      release();
+      const outcome = await settled;
+      if (outcome.status === "rejected") throw outcome.error;
+    }
   });
 
   it("keeps observe mode provider-free and mutation-free", async () => {
@@ -208,6 +221,32 @@ describe("MaintenanceCoordinator", () => {
     });
     expect(harness.intake.promoteCommunityFinding).toHaveBeenCalledTimes(1);
     expect(harness.store.getGapFinding("gap-one")?.status).toBe("promoted");
+  });
+
+  it("terminally blocks a semantically inconsistent gap with durable evidence", async () => {
+    const source = communitySource("qwen-code", "https://github.com/QwenLM/qwen-code");
+    const harness = createHarness({ sources: [source] });
+    queueGap(harness.store, harness.config, source, "gap-inconsistent", 90, {
+      title: "Parallel agents",
+      body: "Concurrent subagent worktrees improve delivery.",
+    });
+
+    await expect(harness.coordinator.tick(signal())).resolves.toMatchObject({
+      action: "gap-promotion",
+      state: "blocked",
+    });
+    expect(harness.findingNormalizer.normalize).not.toHaveBeenCalled();
+    expect(harness.intake.promoteCommunityFinding).not.toHaveBeenCalled();
+    expect(harness.store.getGapFinding("gap-inconsistent")).toMatchObject({
+      status: "blocked",
+      retryAfter: null,
+      evidence: {
+        promotion: {
+          status: "blocked",
+          reason: "observation does not support the candidate classification",
+        },
+      },
+    });
   });
 
   it("returns the next tick to the ready queue after one gap promotion", async () => {
@@ -631,6 +670,13 @@ function queueGap(
   source: CommunitySource,
   fingerprint: string,
   score: number,
+  observationText: {
+    title: string;
+    body: string;
+  } = {
+    title: "Windows platform compatibility",
+    body: "Cross-platform support for Windows and macOS.",
+  },
 ): void {
   const externalId = `${fingerprint}-commit`;
   const sourceUrl = `${source.repository}/commit/${"b".repeat(40)}`;
@@ -658,8 +704,8 @@ function queueGap(
       kind: "repository" as const,
       externalId,
       sha: "b".repeat(40),
-      title: "Windows platform compatibility",
-      body: "Cross-platform support for Windows and macOS.",
+      title: observationText.title,
+      body: observationText.body,
       observedAt: 100_000,
       incremental: true,
     },

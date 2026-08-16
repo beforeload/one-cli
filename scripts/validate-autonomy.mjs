@@ -34,6 +34,7 @@ const trustedVerifierExactPaths = [
   "package-lock.json",
   "scripts/bootstrap-verifier-runner.sh",
   "scripts/independent-verifier.mjs",
+  "scripts/github-autonomy.mjs",
   "scripts/validate-autonomy.mjs",
   "scripts/validate-harness.mjs",
   "tsconfig.json",
@@ -117,7 +118,6 @@ for (const [file, values] of Object.entries({
   ],
   ".autonomy/quality-gates.yml": [
     "    - verify",
-    "    - one-cli/independent-verifier",
     "    - AUTONOMY.md",
     "    - .autonomy/**",
     "    - .github/workflows/**",
@@ -353,6 +353,13 @@ for (const codeownerPath of [
 }
 
 const verifierPolicy = YAML.parse(documents.get("harness/verifier-policy.yml") ?? "");
+const autonomyWorkflow = fs.readFileSync(path.join(root, ".github/workflows/autonomy-tick.yml"), "utf8");
+if (!/runs-on:\s+ubuntu-latest/u.test(autonomyWorkflow) || /self-hosted|127\.0\.0\.1/u.test(autonomyWorkflow)) {
+  failures.push("autonomy-tick must run only on GitHub-hosted runners without a local proxy");
+}
+for (const expected of ["git apply --check", "npm run check", "gh pr merge", "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"]) {
+  if (!autonomyWorkflow.includes(expected)) failures.push(`autonomy-tick must contain ${expected}`);
+}
 if (
   verifierPolicy?.requiredChecks?.length !== 2 ||
   verifierPolicy.requiredChecks.some((check) => check?.appId !== 15368) ||

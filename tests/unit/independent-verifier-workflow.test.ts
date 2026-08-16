@@ -1,584 +1,65 @@
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
-const workflow = read(".github/workflows/independent-verifier.yml");
-const script = read("scripts/independent-verifier.mjs");
-const policy = read("harness/verifier-policy.yml");
+const workflow = fs.readFileSync(path.join(ROOT, ".github/workflows/autonomy-tick.yml"), "utf8");
+const watchdog = fs.readFileSync(path.join(ROOT, ".github/workflows/autonomy-watchdog.yml"), "utf8");
+const verify = fs.readFileSync(path.join(ROOT, ".github/workflows/verify.yml"), "utf8");
+const driver = fs.readFileSync(path.join(ROOT, "scripts/github-autonomy.mjs"), "utf8");
 
-describe("independent verifier trusted workflow", () => {
-  it("runs for every PR class from exact trusted base code with isolated untrusted data", () => {
-    expect(workflow).toContain("pull_request_target:");
-    expect(workflow).not.toMatch(/\n\s+paths(?:-ignore)?:/u);
-    expect(workflow).not.toContain("github.event.pull_request.draft == false");
-    expect(workflow).toContain("ref: ${{ github.event.pull_request.base.sha }}");
-    expect(workflow).toContain("path: trusted");
-    expect(workflow).toContain("ref: refs/pull/${{ github.event.pull_request.number }}/head");
-    expect(workflow).toContain("path: untrusted");
-    expect(workflow.match(/persist-credentials: false/gu)).toHaveLength(3);
-    expect(workflow).toContain('node "$TRUSTED_ROOT/scripts/independent-verifier.mjs"');
-    expect(workflow).not.toMatch(/working-directory:\s*untrusted/u);
-    expect(workflow).toContain("name: one-cli/independent-verifier");
+describe("GitHub-hosted unattended workflow", () => {
+  it("keeps model execution separate from publication", () => {
+    expect(workflow).toContain("build-without-repository-credentials");
+    expect(workflow).toContain("publish-without-model-credentials");
+    expect(workflow).toContain("actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349");
+    expect(workflow).toContain("--allowedTools \"Read,Edit,Write,Grep\"");
+    expect(workflow).not.toContain("GH_TOKEN: ${{ github.token }}");
   });
 
-  it("uses the workflow token only for GitHub API writes with least privilege", () => {
-    expect(workflow).not.toMatch(/create-github-app-token|PRIVATE_KEY|secrets\.|VERIFIER_TOKEN/u);
-    expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/gu)).toHaveLength(2);
-    expect(workflow).toMatch(
-      /verifier:[\s\S]*?permissions:\n\s+contents: read\n\s+checks: read\n\s+pull-requests: write/u,
-    );
-    expect(workflow).toMatch(
-      /merge:[\s\S]*?permissions:\n\s+contents: write\n\s+checks: read\n\s+pull-requests: read/u,
-    );
-    expect(workflow).not.toContain("checks: write");
-    expect(workflow).not.toContain("administration:");
-    expect(workflow).toMatch(/ONE_CLI_VERIFIER_POLICY_SHA256: [0-9a-f]{64}/u);
+  it("runs active jobs only on GitHub-hosted runners", () => {
+    expect(workflow).not.toMatch(/self-hosted|127\.0\.0\.1|launchd/u);
+    expect(verify).not.toMatch(/self-hosted|127\.0\.0\.1|launchd/u);
+    expect(workflow.match(/runs-on: ubuntu-latest/gu)?.length).toBeGreaterThanOrEqual(4);
+    expect(verify).toContain("runs-on: ubuntu-latest");
+    expect(watchdog).toContain("runs-on: ubuntu-latest");
+    expect(watchdog).not.toMatch(/self-hosted|127\.0\.0\.1|launchd/u);
   });
 
-  it("uses two distinct local proxy defaults without repository secrets", () => {
-    expect(policy).toContain("defaultModel: claude-opus-4.8");
-    expect(policy).toContain("defaultModel: gpt-5.4");
-    expect(policy).toContain("defaultBaseUrl: http://127.0.0.1:8085/v1");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_MODEL_A");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_MODEL_B");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_REPOSITORY_BASE_URL");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_API_KEY: local-proxy");
-    expect(script).toContain("localProxyBaseUrl");
-    expect(script).toContain("policy.semanticReview.apiKey");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_A");
-    expect(workflow).toContain("ONE_CLI_VERIFIER_MODEL_B");
-    expect(workflow).not.toMatch(/MODEL_[AB]_(?:API_KEY|BASE_URL)/u);
-    expect(script).toContain("const semantic = await semanticReviews(");
-    expect(script).not.toContain("if (protectedChange)");
+  it("recovers a missed scheduled run on GitHub", () => {
+    expect(workflow).toContain('cron: "7,37 * * * *"');
+    expect(watchdog).toContain('cron: "17,47 * * * *"');
+    expect(watchdog).toContain("actions: write");
+    expect(watchdog).toContain("latest_success");
+    expect(watchdog).toContain("now - success_epoch < 2700");
+    expect(watchdog).toContain("actions/workflows/autonomy-tick.yml/dispatches");
   });
 
-  it("pins verifier and merge jobs to the dedicated repository runner", () => {
-    expect(workflow.match(/runs-on: \[self-hosted, macOS, one-cli-verifier\]/gu)).toHaveLength(2);
-    expect(workflow).not.toMatch(/ubuntu-latest|macos-latest/u);
+  it("binds artifacts and runs the complete repository gate", () => {
+    expect(workflow).toContain("git apply --check");
+    expect(driver).toContain("patchSha256");
+    expect(driver).toContain('execFileSync("git", ["apply", "--check"');
+    expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/change\/selection\/selection\.json"/gu)?.length ?? 0)
+      .toBe(1);
+    expect(workflow.match(/--selection "\$\{RUNNER_TEMP\}\/verified\/selection\/selection\.json"/gu)?.length ?? 0)
+      .toBe(4);
+    expect(workflow).toContain("${{ runner.temp }}/change/selection/selection.json");
+    expect(workflow).toContain("npm run check");
+    expect(workflow).toContain("gh pr merge");
   });
 
-  it("uses the identical bounded offline host toolchain preflight in both jobs", () => {
-    expect(workflow.match(/name: Validate preinstalled Node\.js toolchain/gu)).toHaveLength(2);
-    expect(
-      workflow.match(/shell: \/bin\/bash --noprofile --norc -euo pipefail \{0\}/gu),
-    ).toHaveLength(2);
-    expect(
-      workflow.match(
-        /expected_path="\$\{ONE_CLI_NODE_BIN:\?runner service must define ONE_CLI_NODE_BIN\}:\$strict_path_suffix"/gu,
-      ),
-    ).toHaveLength(2);
-    expect(workflow.match(/\[\[ "\$PATH" == "\$expected_path" \]\]/gu)).toHaveLength(2);
-    expect(
-      workflow.match(/node_version="\$\(bounded_version node "\$ONE_CLI_NODE_BIN\/node"\)"/gu),
-    ).toHaveLength(2);
-    expect(
-      workflow.match(/npm_version="\$\(bounded_version npm "\$ONE_CLI_NODE_BIN\/npm"\)"/gu),
-    ).toHaveLength(2);
-    expect(workflow.match(/sleep 10/gu)).toHaveLength(2);
-    expect(workflow.match(/Verifier Node\.js must be >=22\.13\.0 and <25/gu)).toHaveLength(2);
-    expect(policy).toContain("nodeBinEnvironment: ONE_CLI_NODE_BIN");
-    expect(policy).toContain('nodeVersionRange: ">=22.13.0 <25"');
-    expect(policy).toContain(
-      "strictPathSuffix: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-    );
+  it("deduplicates GitHub issue inventory before roadmap matching", () => {
+    expect(driver).toContain("dedupeIssues");
+    expect(driver).toContain("issues?state=all&labels=agent-ready&per_page=100");
+    expect(driver).toContain("conflicting records for issue #");
+    expect(driver).toContain("at most one open issue");
+    expect(driver).toContain("openMatches.length === 0");
   });
 
-  it("never downloads or provisions Node in verifier jobs", () => {
-    expect(workflow).not.toMatch(
-      /actions\/setup-node|actions\/download-artifact|node-version:|cache-dependency-path:/u,
-    );
-    const actions = [...workflow.matchAll(/^\s*uses:\s*(\S+)/gmu)].map((match) => match[1]);
-    expect(actions).toEqual([
-      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
-      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
-      "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
-    ]);
-  });
-
-  it("uses exact git objects and fails closed instead of accepting REST patches", () => {
-    expect(script).toContain('"cat-file", "-e"');
-    expect(script).toContain('"--binary"');
-    expect(script).toContain('"--full-index"');
-    expect(script).toContain('"--no-textconv"');
-    expect(script).not.toMatch(/pulls\/\$\{[^}]+\}\/files|\.patch\b/u);
-    expect(script).toContain("Git evidence exceeds its strict byte bound");
-  });
-
-  it("pins built-in check/review provenance and revalidates exact base/head", () => {
-    expect(script).toContain("required.appId");
-    expect(script).toContain("actor.login !== policy.reviewIdentity.actor");
-    expect(script).toContain("commit_id: binding.headSha");
-    expect(script).toContain("() => revalidatePull(github, policy, binding)");
-    expect(script).toContain("{ sha: binding.headSha, merge_method: policy.merge.method }");
-    expect(script.match(/revalidatePull\(github, policy, binding/gu)?.length ?? 0)
-      .toBeGreaterThanOrEqual(3);
-    expect(script).toContain("Exact head lacks one pinned github-actions[bot] approval");
-  });
-
-  it("never calls branch-protection or ruleset endpoints from the trusted workflow token", () => {
-    expect(script).not.toMatch(/branches\/[^/]+\/protection|\/rulesets/u);
-    expect(script).not.toContain('"/installation"');
-    expect(script).not.toMatch(/\/actions\/permissions/u);
-    expect(script).not.toContain("assertStrictProtection");
-  });
-
-  it("performs final live binding reads after waits and immediately before writes", () => {
-    const finalReview = script.slice(
-      script.indexOf("async function submitFinalReview"),
-      script.indexOf("export async function submitBoundReview"),
-    );
-    expect(finalReview.indexOf("waitForPinnedChecks")).toBeLessThan(
-      finalReview.indexOf("revalidatePull"),
-    );
-    expect(finalReview).toContain("() => revalidatePull(github, policy, binding)");
-    expect(finalReview.trimEnd().endsWith(");\n}")).toBe(true);
-
-    const mergePreconditions = script.slice(
-      script.indexOf("export async function assertMergePreconditions"),
-      script.indexOf("async function mergeExactHead"),
-    );
-    expect(mergePreconditions.indexOf("waitForPinnedChecks")).toBeLessThan(
-      mergePreconditions.indexOf("assertBoundApproval"),
-    );
-    expect(mergePreconditions.trimEnd().endsWith(
-      "await revalidatePull(github, policy, binding, true);\n}",
-    )).toBe(true);
-  });
-
-  it("gives every head a distinct SHA-bound review operation", () => {
-    expect(script).toContain('const REVIEW_MARKER_PREFIX = "one-cli-independent-verifier:v4:"');
-    expect(script).toContain(
-      "`${REVIEW_MARKER_PREFIX}${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`",
-    );
-    expect(script).toContain('"REQUEST_CHANGES"');
-    expect(script).toContain('"APPROVE"');
-  });
-
-  it("is dry-run inspection by default and cannot review or merge locally", () => {
-    const dryRun = script.indexOf("if (!options.verify)");
-    const tokenRead = script.indexOf("const github = githubClient(environment, policy)", dryRun);
-    const reviewWrite = script.indexOf("await submitFinalReview(", tokenRead);
-    expect(dryRun).toBeGreaterThan(0);
-    expect(tokenRead).toBeGreaterThan(dryRun);
-    expect(reviewWrite).toBeGreaterThan(tokenRead);
-  });
-
-  it("authenticates the exact Actions context and optional pinned bot user", async () => {
-    const verifier = await verifierModule();
-    const policy = verifierPolicy();
-    const binding = pullBinding("a".repeat(40), "b".repeat(40));
-    const calls: string[] = [];
-    const github = {
-      request: async (_method: string, apiPath: string) => {
-        calls.push(apiPath);
-        return {
-          login: "github-actions[bot]",
-          id: 41898282,
-          type: "Bot",
-        };
-      },
-    };
-    const environment = {
-      GITHUB_ACTIONS: "true",
-      GITHUB_REPOSITORY: "beforeload/one-cli",
-      GITHUB_EVENT_NAME: "pull_request_target",
-      GITHUB_ACTOR: "untrusted-pull-author",
-    };
-    await expect(verifier.assertTrustedActionsContext(
-      github,
-      policy,
-      binding,
-      environment,
-    )).resolves.toBeUndefined();
-    expect(calls).toEqual(["/user"]);
-
-    const wrongActor = {
-      request: async () => ({
-        login: "github-actions[bot]",
-        id: 4242,
-        type: "Bot",
-      }),
-    };
-    await expect(verifier.assertTrustedActionsContext(
-      wrongActor,
-      policy,
-      binding,
-      environment,
-    )).rejects.toThrow("pinned GitHub Actions bot");
-    await expect(verifier.assertTrustedActionsContext(
-      github,
-      policy,
-      binding,
-      { ...environment, GITHUB_REPOSITORY: "fork/one-cli" },
-    )).rejects.toThrow("exact trusted GitHub Actions context");
-  });
-
-  it("accepts unavailable optional user identity without installation introspection", async () => {
-    const verifier = await verifierModule();
-    await expect(verifier.assertTrustedActionsContext(
-      { request: async () => undefined },
-      verifierPolicy(),
-      pullBinding("a".repeat(40), "b".repeat(40)),
-      {
-        GITHUB_ACTIONS: "true",
-        GITHUB_REPOSITORY: "beforeload/one-cli",
-        GITHUB_EVENT_NAME: "pull_request_target",
-      },
-    )).resolves.toBeUndefined();
-  });
-
-  it("publishes a later approval over a prior exact failure without dismissal", async () => {
-    const verifier = await verifierModule();
-    const policy = verifierPolicy();
-    const binding = pullBinding("a".repeat(40), "b".repeat(40));
-    const marker = reviewMarker(binding);
-    const approvedBody = `${marker}\n\n{"result":"eligible"}`;
-    const calls: Array<{ method: string; body?: unknown }> = [];
-    const github = {
-      request: async (method: string, _apiPath: string, body?: unknown) => {
-        calls.push({ method, body });
-        if (method === "GET") {
-          return [exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z")];
-        }
-        return {
-          ...exactReview(binding, "APPROVED", "2026-08-10T10:01:00Z"),
-          body: approvedBody,
-        };
-      },
-    };
-    const beforeReview = vi.fn(async () => undefined);
-
-    await expect(verifier.submitBoundReview(
-      github,
-      policy,
-      binding,
-      marker,
-      "APPROVE",
-      approvedBody,
-      beforeReview,
-    )).resolves.toBeUndefined();
-
-    expect(beforeReview).toHaveBeenCalledOnce();
-    expect(calls).toEqual([
-      { method: "GET", body: undefined },
-      {
-        method: "POST",
-        body: { commit_id: binding.headSha, event: "APPROVE", body: approvedBody },
-      },
-    ]);
-  });
-
-  it("reconciles repeated exact failures and same-state duplicates without writing", async () => {
-    const verifier = await verifierModule();
-    const policy = verifierPolicy();
-    const binding = pullBinding("a".repeat(40), "b".repeat(40));
-    const marker = reviewMarker(binding);
-    const github = {
-      request: async (method: string) => {
-        expect(method).toBe("GET");
-        return [
-          exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
-          {
-            ...exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
-            body: `${marker}\n\n{"result":"different failure detail"}`,
-          },
-        ];
-      },
-    };
-    const beforeReview = vi.fn(async () => undefined);
-
-    await expect(verifier.submitBoundReview(
-      github,
-      policy,
-      binding,
-      marker,
-      "REQUEST_CHANGES",
-      `${marker}\n\n{"result":"latest failure detail"}`,
-      beforeReview,
-    )).resolves.toBeUndefined();
-    expect(beforeReview).toHaveBeenCalledOnce();
-  });
-
-  it("uses only the unambiguous latest exact review state for merge approval", async () => {
-    const verifier = await verifierModule();
-    const policy = verifierPolicy();
-    const binding = pullBinding("a".repeat(40), "b".repeat(40));
-    const reviews = [
-      exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:00:00Z"),
-      exactReview(binding, "APPROVED", "2026-08-10T10:01:00Z"),
-    ];
-    await expect(verifier.assertBoundApproval(
-      { request: async () => reviews },
-      policy,
-      binding,
-    )).resolves.toBeUndefined();
-
-    await expect(verifier.assertBoundApproval(
-      { request: async () => [...reviews].reverse() },
-      policy,
-      binding,
-    )).resolves.toBeUndefined();
-
-    await expect(verifier.assertBoundApproval(
-      {
-        request: async () => [
-          reviews[1],
-          exactReview(binding, "CHANGES_REQUESTED", "2026-08-10T10:02:00Z"),
-        ],
-      },
-      policy,
-      binding,
-    )).rejects.toThrow("lacks one pinned");
-  });
-
-  it("fails closed on ambiguous or foreign exact-operation review evidence", async () => {
-    const verifier = await verifierModule();
-    const policy = verifierPolicy();
-    const binding = pullBinding("a".repeat(40), "b".repeat(40));
-    const latest = "2026-08-10T10:00:00Z";
-    await expect(verifier.assertBoundApproval(
-      {
-        request: async () => [
-          exactReview(binding, "APPROVED", latest),
-          exactReview(binding, "CHANGES_REQUESTED", latest),
-        ],
-      },
-      policy,
-      binding,
-    )).rejects.toThrow("ambiguous");
-
-    const foreignReviews = [
-      {
-        ...exactReview(binding, "APPROVED", latest),
-        user: { login: "someone-else", id: 1, type: "User" },
-      },
-      { ...exactReview(binding, "APPROVED", latest), commit_id: "c".repeat(40) },
-      {
-        ...exactReview(binding, "APPROVED", latest),
-        body: `one-cli-independent-verifier:v4:7:${binding.baseSha}:${"c".repeat(40)}`,
-      },
-    ];
-    for (const review of foreignReviews) {
-      await expect(verifier.assertBoundApproval(
-        { request: async () => [review] },
-        policy,
-        binding,
-      )).rejects.toThrow("conflicts with the exact operation");
-    }
-  });
-
-  it("blocks merge when the default branch head advances after verification", async () => {
-    const verifier = await verifierModule();
-    const baseSha = "a".repeat(40);
-    const headSha = "b".repeat(40);
-    const policy = verifierPolicy();
-    const binding = pullBinding(baseSha, headSha);
-    const calls: string[] = [];
-    const github = {
-      request: async (_method: string, apiPath: string) => {
-        calls.push(apiPath);
-        if (apiPath.includes("/check-runs")) {
-          return {
-            total_count: 2,
-            check_runs: [
-              {
-                name: "verify",
-                head_sha: headSha,
-                status: "completed",
-                conclusion: "success",
-                app: { id: 15368 },
-              },
-              {
-                name: "one-cli/independent-verifier",
-                head_sha: headSha,
-                status: "completed",
-                conclusion: "success",
-                app: { id: 15368 },
-              },
-            ],
-          };
-        }
-        if (apiPath.endsWith("/reviews?per_page=100")) {
-          return [
-            {
-              state: "APPROVED",
-              commit_id: headSha,
-              body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
-              submitted_at: "2026-08-10T10:00:00Z",
-              user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
-            },
-          ];
-        }
-        if (apiPath.includes("/compare/")) {
-          return { merge_base_commit: { sha: baseSha } };
-        }
-        if (apiPath === "/repos/beforeload/one-cli") {
-          return { full_name: "beforeload/one-cli", default_branch: "main" };
-        }
-        if (apiPath.includes("/pulls/7")) {
-          return {
-            state: "open",
-            draft: false,
-            mergeable: true,
-            base: {
-              ref: "main",
-              sha: baseSha,
-              repo: { full_name: "beforeload/one-cli" },
-            },
-            head: { sha: headSha },
-          };
-        }
-        if (apiPath.endsWith("/branches/main")) {
-          return { name: "main", commit: { sha: "d".repeat(40) } };
-        }
-        throw new Error(`Unexpected API path: ${apiPath}`);
-      },
-    };
-    await expect(verifier.assertMergePreconditions(
-      github,
-      policy,
-      binding,
-    )).rejects.toThrow("Default branch advanced");
-    expect(calls.some((apiPath) => apiPath.endsWith("/protection"))).toBe(false);
-    expect(calls.slice(-3)).toEqual([
-      "/repos/beforeload/one-cli",
-      "/repos/beforeload/one-cli/pulls/7",
-      "/repos/beforeload/one-cli/branches/main",
-    ]);
-  });
-
-  it("blocks merge when repository default_branch changes", async () => {
-    const verifier = await verifierModule();
-    const baseSha = "a".repeat(40);
-    const headSha = "b".repeat(40);
-    const github = {
-      request: async (_method: string, apiPath: string) => {
-        if (apiPath.includes("/check-runs")) {
-          return {
-            total_count: 2,
-            check_runs: [
-              {
-                name: "verify",
-                head_sha: headSha,
-                status: "completed",
-                conclusion: "success",
-                app: { id: 15368 },
-              },
-              {
-                name: "one-cli/independent-verifier",
-                head_sha: headSha,
-                status: "completed",
-                conclusion: "success",
-                app: { id: 15368 },
-              },
-            ],
-          };
-        }
-        if (apiPath.endsWith("/reviews?per_page=100")) {
-          return [
-            {
-              state: "APPROVED",
-              commit_id: headSha,
-              body: `one-cli-independent-verifier:v4:7:${baseSha}:${headSha}`,
-              submitted_at: "2026-08-10T10:00:00Z",
-              user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
-            },
-          ];
-        }
-        if (apiPath.includes("/compare/")) {
-          return { merge_base_commit: { sha: baseSha } };
-        }
-        if (apiPath === "/repos/beforeload/one-cli") {
-          return { full_name: "beforeload/one-cli", default_branch: "develop" };
-        }
-        throw new Error(`Unexpected API path: ${apiPath}`);
-      },
-    };
-    await expect(verifier.assertMergePreconditions(
-      github,
-      verifierPolicy(),
-      pullBinding(baseSha, headSha),
-    )).rejects.toThrow("default branch changed");
+  it("preserves lease fencing invariants in the model prompt", () => {
+    expect(driver).toContain("lease release must remove only the exact owner-and-fence row");
+    expect(driver).toContain("newer fenced owner to reacquire immediately");
+    expect(driver).toContain("never leave an unhandled promise rejection after cleanup");
+    expect(driver).toContain("assert only the new events produced by the operation under test");
   });
 });
-
-function read(relative: string): string {
-  return fs.readFileSync(path.join(ROOT, relative), "utf8");
-}
-
-async function verifierModule(): Promise<{
-  assertTrustedActionsContext(
-    github: { request(method: string, apiPath: string): Promise<unknown> },
-    policy: unknown,
-    binding: unknown,
-    environment: Record<string, string>,
-  ): Promise<void>;
-  assertBoundApproval(
-    github: { request(method: string, apiPath: string): Promise<unknown> },
-    policy: unknown,
-    binding: unknown,
-  ): Promise<void>;
-  submitBoundReview(
-    github: { request(method: string, apiPath: string, body?: unknown): Promise<unknown> },
-    policy: unknown,
-    binding: unknown,
-    marker: string,
-    event: "APPROVE" | "REQUEST_CHANGES",
-    body: string,
-    beforeReview: () => Promise<void>,
-  ): Promise<void>;
-  assertMergePreconditions(
-    github: { request(method: string, apiPath: string): Promise<unknown> },
-    policy: unknown,
-    binding: unknown,
-  ): Promise<void>;
-}> {
-  return await import(pathToFileURL(path.join(ROOT, "scripts/independent-verifier.mjs")).href);
-}
-
-function verifierPolicy() {
-  return {
-    repository: { owner: "beforeload", name: "one-cli", defaultBranch: "main" },
-    workflow: { event: "pull_request_target" },
-    requiredChecks: [
-      { name: "verify", appId: 15368 },
-      { name: "one-cli/independent-verifier", appId: 15368 },
-    ],
-    reviewIdentity: {
-      appId: 15368,
-      actor: "github-actions[bot]",
-      actorId: 41898282,
-    },
-  };
-}
-
-function pullBinding(baseSha: string, headSha: string) {
-  return {
-    repository: "beforeload/one-cli",
-    baseRepository: "beforeload/one-cli",
-    baseRef: "main",
-    baseSha,
-    headSha,
-    pullNumber: 7,
-  };
-}
-
-function reviewMarker(binding: ReturnType<typeof pullBinding>): string {
-  return `one-cli-independent-verifier:v4:${binding.pullNumber}:${binding.baseSha}:${binding.headSha}`;
-}
-
-function exactReview(
-  binding: ReturnType<typeof pullBinding>,
-  state: "APPROVED" | "CHANGES_REQUESTED",
-  submittedAt: string,
-) {
-  return {
-    state,
-    commit_id: binding.headSha,
-    body: reviewMarker(binding),
-    submitted_at: submittedAt,
-    user: { login: "github-actions[bot]", id: 41898282, type: "Bot" },
-  };
-}

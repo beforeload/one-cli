@@ -1,0 +1,49 @@
+name: autonomy-watchdog
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: autonomy-watchdog
+  cancel-in-progress: false
+
+jobs:
+  recover-missed-schedule:
+    name: recover-missed-autonomy-tick
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check recent autonomy runs
+        id: recent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +%s)"
+          runs="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow autonomy-tick.yml --branch main --limit 20 --json status,conclusion,createdAt,event)"
+          active="$(jq '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"${runs}")"
+          latest_success="$(jq -r '[.[] | select(.status == "completed" and .conclusion == "success") | .createdAt] | max // empty' <<<"${runs}")"
+          stale=true
+          if [[ -n "${latest_success}" ]]; then
+            success_epoch="$(date -u -d "${latest_success}" +%s)"
+            (( now - success_epoch < 2700 )) && stale=false
+          fi
+          if (( active > 0 )); then stale=false; fi
+          echo "stale=${stale}" >> "${GITHUB_OUTPUT}"
+          echo "active=${active} latest_success=${latest_success:-none} stale=${stale}"
+      - name: Dispatch recovery run
+        if: steps.recent.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/autonomy-tick.yml/dispatches" \
+            -f ref=main
+          echo "Dispatched recovery autonomy-tick run."
