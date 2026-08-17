@@ -8,7 +8,9 @@ import {
   NON_AUTO_REPAIR_CLASSES,
   applyDependencyRepair,
   applyLintRepair,
+  applyAgentRepair,
   applyRepairTask,
+  buildAgentRepairPrompt,
   createRepairTask,
   decideHeal,
   decompose,
@@ -16,6 +18,8 @@ import {
   detectPackageManager,
   recordHealObservation,
   withStatus,
+  type AgentRepairGit,
+  type AgentRepairRunner,
   type DependencyCommandRunner,
   type DependencyFixCommand,
   type DependencyRepairGit,
@@ -105,8 +109,8 @@ describe("repair.decompose", () => {
     expect([...NON_AUTO_REPAIR_CLASSES].sort()).toEqual(["credential", "roadmap-marker"]);
   });
 
-  it("unimplemented classes yield no task but are NOT human-only (Phase 3 extension point)", () => {
-    for (const cls of ["unit-test", "e2e", "build", "unknown"] as FailureClass[]) {
+  it("unimplemented classes yield no task but are NOT human-only (extension point)", () => {
+    for (const cls of ["e2e", "build", "unknown"] as FailureClass[]) {
       const fake: DiagnosisReceipt = { ...flakyDiagnosis, failureClass: cls };
       const result = decompose(fake, ctx);
       expect(result.tasks).toHaveLength(0);
@@ -775,25 +779,281 @@ describe("repair.applyDependencyRepair (Phase 2-C)", () => {
   });
 });
 
-// --- Phase 2-C: typecheck → conservative human routing -----------------------
+// --- Phase 3-A: typecheck / unit-test → agent-driven repair ------------------
 
-describe("repair.decompose typecheck (Phase 2-C, conservative)", () => {
-  it("(e) typecheck diagnosis → no task + needsHuman (Phase 3 extension point)", () => {
+const unitTestDiagnosis = diagnose(
+  "FAIL tests/unit/session.test.ts > resumes a session\nAssertionError: expected 2 to be 3\n  ❯ tests/unit/session.test.ts:42:24\n1 failed, 10 passed",
+  "unit-test",
+);
+
+/** A fake agent runner that records its input and returns a fixed outcome. */
+function fakeAgentRunner(
+  ok: boolean,
+  summary?: string,
+): AgentRepairRunner & { calls: Array<{ prompt: string; approvedPaths: readonly string[] }> } {
+  const calls: Array<{ prompt: string; approvedPaths: readonly string[] }> = [];
+  return {
+    calls,
+    run: async (input) => {
+      calls.push({ prompt: input.prompt, approvedPaths: input.approvedPaths });
+      return { ok, ...(summary === undefined ? {} : { summary }) };
+    },
+  };
+}
+
+/** A git double that reports a fixed set of changed paths and records staging. */
+function fakeAgentGit(
+  changed: readonly string[],
+): AgentRepairGit & { staged: boolean } {
+  const state = { staged: false };
+  return {
+    get staged() {
+      return state.staged;
+    },
+    changedPaths: async () => changed,
+    stageAll: async () => {
+      state.staged = true;
+    },
+  };
+}
+
+describe("repair.decompose typecheck / unit-test (Phase 3-A, agent-driven)", () => {
+  it("(a) typecheck diagnosis → exactly one requiresAgent task, verifyGate=typecheck", () => {
     expect(typecheckDiagnosis.failureClass).toBe("typecheck");
     const result = decompose(typecheckDiagnosis, ctx);
-    expect(result.tasks).toHaveLength(0);
-    expect(result.needsHuman).toBe(true);
-    expect(result.reason).toMatch(/Phase 3/u);
-    expect(result.reason).toMatch(/typecheck|semantic/iu);
+    expect(result.needsHuman).toBe(false);
+    expect(result.tasks).toHaveLength(1);
+    const task = result.tasks[0]!;
+    expect(task.failureClass).toBe("typecheck");
+    expect(task.requiresAgent).toBe(true);
+    expect(task.verifyGate).toBe("typecheck");
+    expect(task.dependsOn).toEqual([]);
+    expect(task.status).toBe("queued");
+    expect(task.taskId.startsWith("repair:typecheck:")).toBe(true);
+    expect(task.targetPaths).toEqual(typecheckDiagnosis.affectedFiles);
+    expect(task.instruction).toMatch(/agent/iu);
+    expect(task.instruction).toMatch(/minimal/iu);
   });
 
-  it("typecheck routes to a human even within budget (decideHeal → in_doubt)", () => {
+  it("(b) unit-test diagnosis → exactly one requiresAgent task, verifyGate=unit-test", () => {
+    expect(unitTestDiagnosis.failureClass).toBe("unit-test");
+    const result = decompose(unitTestDiagnosis, ctx);
+    expect(result.needsHuman).toBe(false);
+    expect(result.tasks).toHaveLength(1);
+    const task = result.tasks[0]!;
+    expect(task.failureClass).toBe("unit-test");
+    expect(task.requiresAgent).toBe(true);
+    expect(task.verifyGate).toBe("unit-test");
+    expect(task.taskId.startsWith("repair:unit-test:")).toBe(true);
+    expect(task.instruction).toMatch(/do not (?:delete|disable|skip)/iu);
+  });
+
+  it("(f) typecheck hitting a protected path → no task + needsHuman (safety boundary)", () => {
+    const receipt: DiagnosisReceipt = {
+      ...typecheckDiagnosis,
+      affectedFiles: ["src/autonomy/orchestrator.ts", "src/foo.ts"],
+    };
+    const result = decompose(receipt, {
+      timestamp: ctx.timestamp,
+      protectedPaths: ["src/autonomy"],
+    });
+    expect(result.tasks).toHaveLength(0);
+    expect(result.needsHuman).toBe(true);
+    expect(result.reason).toMatch(/protected path/iu);
+  });
+
+  it("unit-test hitting a protected path → no task + needsHuman", () => {
+    const receipt: DiagnosisReceipt = {
+      ...unitTestDiagnosis,
+      affectedFiles: [".github/workflows/ci.yml"],
+    };
+    const result = decompose(receipt, {
+      timestamp: ctx.timestamp,
+      protectedPaths: [".github"],
+    });
+    expect(result.tasks).toHaveLength(0);
+    expect(result.needsHuman).toBe(true);
+  });
+
+  it("agent-driven task within budget → decideHeal returns an actionable repair", () => {
     const counters = recordHealObservation(
       INITIAL_HEAL_COUNTERS,
       typecheckDiagnosis.failureFingerprint,
     );
     const decision = decideHeal(typecheckDiagnosis, counters, ctx);
-    expect(decision.action).toBe("in_doubt");
-    expect(decision.reason).toMatch(/Phase 3|typecheck/iu);
+    expect(decision.action).toBe("repair");
+    if (decision.action === "repair") {
+      expect(decision.task.requiresAgent).toBe(true);
+      expect(decision.task.failureClass).toBe("typecheck");
+    }
+  });
+});
+
+describe("repair.applyAgentRepair (Phase 3-A)", () => {
+  const APPROVED = ["src/foo.ts"] as const;
+
+  function agentTask(failureClass: "typecheck" | "unit-test"): ReturnType<typeof createRepairTask> {
+    return createRepairTask(
+      {
+        failureClass,
+        failureFingerprint: FINGERPRINT,
+        targetPaths: ["src/foo.ts"],
+        instruction: "Use an agent to make the MINIMAL fix inside the approved paths.",
+        verifyGate: failureClass,
+        dependsOn: [],
+        requiresAgent: true,
+      },
+      ctx.timestamp,
+    );
+  }
+
+  it("(c) success: fake runner returns ok + in-bounds diff → stage + valid RecoveryEvidence", async () => {
+    const runner = fakeAgentRunner(true);
+    const git = fakeAgentGit(["src/foo.ts"]);
+    const result = await applyAgentRepair({
+      task: agentTask("typecheck"),
+      diagnosis: typecheckDiagnosis,
+      runner,
+      git,
+      approvedPaths: APPROVED,
+      protectedPaths: ["src/autonomy"],
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-1",
+      timestamp: ctx.timestamp,
+    });
+
+    // The agent was invoked once, with a prompt carrying the approvedPaths + log.
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]!.approvedPaths).toEqual(APPROVED);
+    expect(runner.calls[0]!.prompt).toMatch(/approved paths/iu);
+    // Staged the in-bounds diff, task applied.
+    expect(git.staged).toBe(true);
+    expect(result.staged).toBe(true);
+    expect(result.escapedPaths).toEqual([]);
+    expect(result.task.status).toBe("applied");
+    // Evidence bound to the fingerprint, round-trips through the authenticator.
+    expect(result.evidence).not.toBeNull();
+    const evidence = result.evidence!;
+    expect(evidence.failureFingerprint).toBe(FINGERPRINT);
+    expect(evidence.failureReceiptHash).toBe(RECEIPT_HASH);
+    expect(evidence.source).toBe("worker");
+    expect(() =>
+      assertRecoveryEvidence(
+        evidence,
+        { maxSummaryBytes: 4_096, allowedSources: ["worker"] },
+        AUTH_KEY,
+      ),
+    ).not.toThrow();
+  });
+
+  it("(d) agent changes a path OUTSIDE approvedPaths → abandon, no stage, no evidence", async () => {
+    const git = fakeAgentGit(["src/foo.ts", "src/secret/keys.ts"]);
+    const result = await applyAgentRepair({
+      task: agentTask("typecheck"),
+      diagnosis: typecheckDiagnosis,
+      runner: fakeAgentRunner(true),
+      git,
+      approvedPaths: APPROVED,
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-2",
+      timestamp: ctx.timestamp,
+    });
+    expect(result.task.status).toBe("abandoned");
+    expect(result.evidence).toBeNull();
+    expect(result.staged).toBe(false);
+    expect(git.staged).toBe(false);
+    expect(result.escapedPaths).toEqual(["src/secret/keys.ts"]);
+    expect(result.reason).toMatch(/escaped its authority/iu);
+  });
+
+  it("(d') agent changes a PROTECTED path (inside approvedPaths tree) → abandon, no evidence", async () => {
+    const git = fakeAgentGit(["src/foo.ts"]);
+    const result = await applyAgentRepair({
+      task: agentTask("unit-test"),
+      diagnosis: unitTestDiagnosis,
+      runner: fakeAgentRunner(true),
+      git,
+      approvedPaths: ["src"],
+      protectedPaths: ["src/foo.ts"],
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-3",
+      timestamp: ctx.timestamp,
+    });
+    expect(result.task.status).toBe("abandoned");
+    expect(result.evidence).toBeNull();
+    expect(result.escapedPaths).toEqual(["src/foo.ts"]);
+  });
+
+  it("(e) agent produced no diff → abandoned, no evidence (would recur)", async () => {
+    const git = fakeAgentGit([]);
+    const result = await applyAgentRepair({
+      task: agentTask("unit-test"),
+      diagnosis: unitTestDiagnosis,
+      runner: fakeAgentRunner(true),
+      git,
+      approvedPaths: APPROVED,
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-4",
+      timestamp: ctx.timestamp,
+    });
+    expect(result.task.status).toBe("abandoned");
+    expect(result.evidence).toBeNull();
+    expect(result.staged).toBe(false);
+    expect(result.reason).toMatch(/no diff|would recur/iu);
+  });
+
+  it("agent run fails (not ok) → abandoned, no evidence, no git inspection", async () => {
+    const git = fakeAgentGit(["src/foo.ts"]);
+    const result = await applyAgentRepair({
+      task: agentTask("typecheck"),
+      diagnosis: typecheckDiagnosis,
+      runner: fakeAgentRunner(false, "agent hit its round budget"),
+      git,
+      approvedPaths: APPROVED,
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-5",
+      timestamp: ctx.timestamp,
+    });
+    expect(result.task.status).toBe("abandoned");
+    expect(result.evidence).toBeNull();
+    expect(result.staged).toBe(false);
+    expect(result.reason).toMatch(/did not succeed/iu);
+  });
+
+  it("refuses a non-agent task (deterministic class / requiresAgent false)", async () => {
+    const lintTask = decompose(lintDiagnosis, ctx).tasks[0]!;
+    const result = await applyAgentRepair({
+      task: lintTask,
+      diagnosis: lintDiagnosis,
+      runner: fakeAgentRunner(true),
+      git: fakeAgentGit(["src/util/x.ts"]),
+      approvedPaths: ["src/util/x.ts"],
+      authenticationKey: AUTH_KEY,
+      failureReceiptHash: RECEIPT_HASH,
+      operationId: "op-agent-6",
+      timestamp: ctx.timestamp,
+    });
+    expect(result.task.status).toBe("abandoned");
+    expect(result.evidence).toBeNull();
+    expect(result.reason).toMatch(/non-agent/iu);
+  });
+
+  it("buildAgentRepairPrompt carries class, gate, log excerpt and approvedPaths", () => {
+    const prompt = buildAgentRepairPrompt({
+      task: agentTask("typecheck"),
+      diagnosis: typecheckDiagnosis,
+      approvedPaths: APPROVED,
+      protectedPaths: ["src/autonomy"],
+    });
+    expect(prompt).toMatch(/typecheck/iu);
+    expect(prompt).toContain(typecheckDiagnosis.logExcerpt);
+    expect(prompt).toContain(JSON.stringify([...APPROVED]));
+    expect(prompt).toMatch(/MUST NOT touch/iu);
+    expect(prompt).toMatch(/SMALLEST change/iu);
   });
 });

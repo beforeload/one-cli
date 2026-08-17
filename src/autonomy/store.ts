@@ -11,6 +11,7 @@ import {
   type Check,
   type CheckStatus,
   type EventInput,
+  type FailureClass,
   type GapCategory,
   type GapConfidence,
   type GapFinding,
@@ -23,13 +24,15 @@ import {
   type OperationReservation,
   type OutboxEntry,
   type Repo,
+  type RepairOutcome,
+  type RepairPlaybook,
   type ResearchCheckpoint,
   type ResearchKind,
   type ResearchObservation,
 } from "./domain.js";
 import { LeaseConflictError, LeaseLostError } from "./lease.js";
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
   [
@@ -363,6 +366,26 @@ const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> = [
       SELECT resource, fence FROM leases;
     `,
   ],
+  [
+    10,
+    `
+      CREATE TABLE repair_playbooks (
+        playbook_key TEXT PRIMARY KEY,
+        failure_class TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        applied_count INTEGER NOT NULL DEFAULT 0 CHECK(applied_count >= 0),
+        success_count INTEGER NOT NULL DEFAULT 0 CHECK(success_count >= 0),
+        last_applied_at INTEGER NOT NULL,
+        last_outcome TEXT NOT NULL CHECK(last_outcome IN ('applied', 'abandoned')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK(success_count <= applied_count)
+      ) STRICT;
+
+      CREATE INDEX repair_playbooks_class_idx
+        ON repair_playbooks(failure_class, applied_count DESC, updated_at);
+    `,
+  ],
 ];
 
 interface RepoRow {
@@ -491,6 +514,18 @@ interface ResearchObservationRow {
   sha: string | null;
   evidence_json: string;
   observed_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface RepairPlaybookRow {
+  playbook_key: string;
+  failure_class: FailureClass;
+  strategy: string;
+  applied_count: number;
+  success_count: number;
+  last_applied_at: number;
+  last_outcome: RepairOutcome;
   created_at: number;
   updated_at: number;
 }
@@ -1866,6 +1901,89 @@ export class AutonomyStore {
     return row ? gapFindingFromRow(row) : undefined;
   }
 
+  // --- Repair playbooks (Phase 3-B: self-evolving playbook library) ---------
+
+  /**
+   * Record one repair application onto its playbook: appliedCount always ++,
+   * successCount ++ only when the strategy actually fixed the failure. Upserts
+   * by playbookKey so repeated outcomes accumulate deterministically. Mirrors
+   * {@link upsertGapFinding}'s ON CONFLICT accumulation pattern.
+   */
+  recordRepairPlaybookOutcome(input: {
+    playbookKey: string;
+    failureClass: FailureClass;
+    strategy: string;
+    success: boolean;
+    now?: number;
+  }): RepairPlaybook {
+    const now = timestamp(input.now);
+    requireText(input.playbookKey, "playbook key");
+    requireText(input.strategy, "playbook strategy");
+    const outcome: RepairOutcome = input.success ? "applied" : "abandoned";
+    const applied = 1;
+    const success = input.success ? 1 : 0;
+    return this.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO repair_playbooks(
+             playbook_key, failure_class, strategy, applied_count, success_count,
+             last_applied_at, last_outcome, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(playbook_key) DO UPDATE SET
+             applied_count = applied_count + excluded.applied_count,
+             success_count = success_count + excluded.success_count,
+             last_applied_at = excluded.last_applied_at,
+             last_outcome = excluded.last_outcome,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          input.playbookKey,
+          input.failureClass,
+          input.strategy,
+          applied,
+          success,
+          now,
+          outcome,
+          now,
+          now,
+        );
+      return this.getRepairPlaybook(input.playbookKey)!;
+    });
+  }
+
+  getRepairPlaybook(playbookKey: string): RepairPlaybook | undefined {
+    this.assertOpen();
+    const row = this.database
+      .prepare(
+        `SELECT playbook_key, failure_class, strategy, applied_count, success_count,
+                last_applied_at, last_outcome, created_at, updated_at
+         FROM repair_playbooks WHERE playbook_key = ?`,
+      )
+      .get(playbookKey) as unknown as RepairPlaybookRow | undefined;
+    return row ? repairPlaybookFromRow(row) : undefined;
+  }
+
+  listRepairPlaybooks(options: { failureClass?: FailureClass; limit?: number } = {}): RepairPlaybook[] {
+    this.assertOpen();
+    const clauses: string[] = [];
+    const parameters: Array<string | number> = [];
+    if (options.failureClass !== undefined) {
+      clauses.push("failure_class = ?");
+      parameters.push(options.failureClass);
+    }
+    parameters.push(positiveLimit(options.limit, "Repair playbook"));
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(
+        `SELECT playbook_key, failure_class, strategy, applied_count, success_count,
+                last_applied_at, last_outcome, created_at, updated_at
+         FROM repair_playbooks${where}
+         ORDER BY applied_count DESC, updated_at, playbook_key LIMIT ?`,
+      )
+      .all(...parameters) as unknown as RepairPlaybookRow[];
+    return rows.map(repairPlaybookFromRow);
+  }
+
   private migrate(): void {
     const current = Number(
       (
@@ -2150,6 +2268,21 @@ function researchObservationFromRow(row: ResearchObservationRow): ResearchObserv
     sha: row.sha,
     evidence: parseJson(row.evidence_json),
     observedAt: row.observed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function repairPlaybookFromRow(row: RepairPlaybookRow): RepairPlaybook {
+  return {
+    schema: "autonomy.one-cli/repair-playbook-v1",
+    playbookKey: row.playbook_key,
+    failureClass: row.failure_class,
+    strategy: row.strategy,
+    appliedCount: row.applied_count,
+    successCount: row.success_count,
+    lastAppliedAt: row.last_applied_at,
+    lastOutcome: row.last_outcome,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
