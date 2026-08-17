@@ -6,6 +6,12 @@ export interface ToolCall {
 
 export type ToolOutcome = "succeeded" | "failed" | "denied" | "cancelled";
 
+export interface ContextCompactionOptions {
+  maxMessages: number;
+  maxBytes: number;
+  recentTurns: number;
+}
+
 export type ChatMessage =
   | { role: "system" | "user"; content: string }
   | {
