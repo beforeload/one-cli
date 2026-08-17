@@ -186,6 +186,16 @@ export interface RepairTask {
   targetPaths: readonly string[];
   /** Deterministic, human-readable action ("retry CI, no code change"). */
   instruction: string;
+  /**
+   * True when this task's repair action is NOT a deterministic command but an
+   * agent-driven fix (Phase 3): the semantic classes (typecheck / unit-test)
+   * whose correct repair requires model analysis of the failure log. The agent
+   * is still bounded — it may write only inside `targetPaths`/approvedPaths, its
+   * diff must pass the existing deterministic review + change-file budget before
+   * any commit, and a would-be protected-path touch routes to a human at
+   * decompose time. Absent/false for the deterministic classes (flaky/lint/dep).
+   */
+  requiresAgent?: boolean;
   /** Gate that must pass to consider this task verified (from the diagnosis). */
   verifyGate: string | null;
   /** taskIds that must reach `verified` before this task may start. */
@@ -475,6 +485,46 @@ export interface GapFinding {
   retryCount: number;
   retryAfter: number | null;
   expiresAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Outcome of a single repair application, recorded onto its playbook. */
+export type RepairOutcome = "applied" | "abandoned";
+
+/**
+ * Phase 3-B of the PR self-heal loop — the self-evolving playbook library.
+ *
+ * A RepairPlaybook is a bounded, deterministic tally of how one repair
+ * *strategy* has historically fared against one {@link FailureClass}. It is the
+ * memory that lets self-heal get "smarter": strategies that keep working are
+ * ranked ahead of ones that keep failing, and strategies that fail past a
+ * threshold are demoted so the loop stops retrying dead ends.
+ *
+ * It is pure statistics — zero LLM. `successCount / appliedCount` is a plain
+ * ratio; ranking is a deterministic sort. It never drives an AttemptState
+ * transition and never bypasses the deterministic review / change-file budget;
+ * it only *reorders* the candidate strategies the existing detect* functions
+ * already produce (with the current hard-coded order as the no-history tie-break
+ * fallback). Persisted additively via {@link AutonomyStore}, mirroring
+ * {@link GapFinding}.
+ *
+ * `playbookKey` = `failureClass:strategySource` — e.g.
+ *   `lint:package.json:lint:fix`, `dependency:pnpm-lock.yaml`, `agent:typecheck`.
+ */
+export interface RepairPlaybook {
+  schema: "autonomy.one-cli/repair-playbook-v1";
+  /** `failureClass:strategySource`; the natural dedupe / lookup key. */
+  playbookKey: string;
+  failureClass: FailureClass;
+  /** How the strategy was detected — e.g. a detect* `source`, or `agent`. */
+  strategy: string;
+  /** Total times this strategy was applied (success + failure). */
+  appliedCount: number;
+  /** Times this strategy produced a verified/applied fix. */
+  successCount: number;
+  lastAppliedAt: number;
+  lastOutcome: RepairOutcome;
   createdAt: number;
   updatedAt: number;
 }
