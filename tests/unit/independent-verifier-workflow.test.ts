@@ -56,6 +56,26 @@ describe("GitHub-hosted unattended workflow", () => {
     expect(driver).toContain("openMatches.length === 0");
   });
 
+  it("tolerates a single misconfigured roadmap issue without halting the tick", () => {
+    // The selection loop must skip-and-record instead of throwing so one bad
+    // roadmap issue cannot break 24/7 unattended autonomy. Security checks are
+    // unchanged: ineligible/protected-path issues are skipped, never selected.
+    const selectBody = driver.slice(driver.indexOf("async function select()"), driver.indexOf("function dedupeIssues"));
+    expect(selectBody).toContain("const skipped = []");
+    expect(selectBody).toContain("skipped.push");
+    expect(selectBody).toContain("errorReason(error)");
+    // Every roadmap-child throw path is wrapped so it becomes a skip, not a crash.
+    expect(selectBody).toMatch(/for \(const child of children\) \{\s*try \{/u);
+    expect(selectBody).toContain("continue;");
+    // The fallback scan also isolates per-issue validation failures.
+    expect(selectBody).toContain("fallback.push(validateIssue(");
+    // No candidate remains a normal idle tick (selected:false), not a failure,
+    // and the skip diagnostics are surfaced for humans/self-heal.
+    expect(selectBody).toContain('selected: false, baseSha, skipped');
+    expect(selectBody).toContain('githubOutput("skipped_count"');
+    expect(driver).toContain("function errorReason(error)");
+  });
+
   it("preserves lease fencing invariants in the model prompt", () => {
     expect(driver).toContain("lease release must remove only the exact owner-and-fence row");
     expect(driver).toContain("newer fenced owner to reacquire immediately");
