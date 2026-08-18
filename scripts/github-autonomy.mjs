@@ -42,29 +42,49 @@ async function select() {
     approvedPaths: canonicalPaths(child.approvedPaths),
   }));
   const issueRows = issues.filter((issue) => issue.pull_request === undefined);
+  // A single misconfigured roadmap issue (missing/ambiguous marker, ineligible
+  // labels, or approved-path bindings that fail the unchanged security checks)
+  // must never halt the 24/7 autonomy tick. We record each blocked child with a
+  // reason, skip it, and keep searching for a healthy, executable issue. The
+  // security validation itself is not relaxed: a protected/out-of-binding path
+  // still makes an issue ineligible; the only change is crash -> skip-and-log.
+  const skipped = [];
   let candidate;
   for (const child of children) {
-    const matches = issueRows.filter((issue) => checkedString(issue.body ?? "", "issue body").includes(child.marker));
-    if (matches.length === 0) throw new Error(`Roadmap marker must identify an issue: ${child.marker}`);
-    const openMatches = matches.filter((issue) => issue.state === "open");
-    if (openMatches.length > 1) throw new Error(`Roadmap marker must identify at most one open issue: ${child.marker}`);
-    if (openMatches.length === 0) continue;
-    const issue = openMatches[0];
-    candidate = validateIssue(issue, owner, policy, child.approvedPaths, pulls);
-    break;
+    try {
+      const matches = issueRows.filter((issue) => checkedString(issue.body ?? "", "issue body").includes(child.marker));
+      if (matches.length === 0) throw new Error(`Roadmap marker must identify an issue: ${child.marker}`);
+      const openMatches = matches.filter((issue) => issue.state === "open");
+      if (openMatches.length > 1) throw new Error(`Roadmap marker must identify at most one open issue: ${child.marker}`);
+      if (openMatches.length === 0) continue;
+      const issue = openMatches[0];
+      candidate = validateIssue(issue, owner, policy, child.approvedPaths, pulls);
+      break;
+    } catch (error) {
+      skipped.push({ marker: child.marker, reason: errorReason(error) });
+      continue;
+    }
   }
   if (candidate === undefined) {
-    candidate = issueRows
-      .filter((issue) => issue.state === "open" && issue.user?.login === owner)
-      .filter((issue) => issue.labels?.some((label) => label.name === "agent-ready"))
-      .filter((issue) => checkedString(issue.body ?? "", "issue body").includes(EXECUTION_MARKER))
-      .map((issue) => validateIssue(issue, owner, policy, undefined, pulls))
-      .sort((left, right) => left.issue.number - right.issue.number)[0];
+    const fallback = [];
+    for (const issue of issueRows) {
+      if (issue.state !== "open" || issue.user?.login !== owner) continue;
+      if (!issue.labels?.some((label) => label.name === "agent-ready")) continue;
+      try {
+        if (!checkedString(issue.body ?? "", "issue body").includes(EXECUTION_MARKER)) continue;
+        fallback.push(validateIssue(issue, owner, policy, undefined, pulls));
+      } catch (error) {
+        skipped.push({ marker: `issue#${issue.number}`, reason: errorReason(error) });
+      }
+    }
+    candidate = fallback.sort((left, right) => left.issue.number - right.issue.number)[0];
   }
   if (candidate === undefined) {
-    writeJson(requiredArg("out"), { schema: "one-cli.workflow-selection/v1", selected: false, baseSha });
+    // No executable candidate is a normal idle tick (exit 0), not a failure.
+    writeJson(requiredArg("out"), { schema: "one-cli.workflow-selection/v1", selected: false, baseSha, skipped });
     githubOutput("selected", "false");
     githubOutput("base_sha", baseSha);
+    githubOutput("skipped_count", String(skipped.length));
     return;
   }
   const selection = {
@@ -82,10 +102,19 @@ async function select() {
     approvedPaths: candidate.approvedPaths,
     branch: `issue/${candidate.issue.number}-workflow`,
     marker: `<!-- ${WORKFLOW_MARKER}:${candidate.issue.number}:${baseSha} -->`,
+    skipped,
   };
   writeJson(requiredArg("out"), selection);
   githubOutput("selected", "true");
   githubOutput("base_sha", baseSha);
+  githubOutput("skipped_count", String(skipped.length));
+}
+
+// Normalize a caught selection error into a bounded, secret-safe reason string
+// for observability. We never surface raw stack traces or unbounded payloads.
+function errorReason(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return checkedString(message, "skip reason").slice(0, 500);
 }
 
 function dedupeIssues(issues) {
